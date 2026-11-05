@@ -1,6 +1,7 @@
 """Load data/seed_incidents.json into the database and the agent's memory."""
 
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -21,8 +22,31 @@ def load_seed_file(path: Path = SEED_PATH) -> list[dict]:
         return json.load(fh)["incidents"]
 
 
+_ISO_IN_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z")
+_PG_IN_TEXT = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?) UTC")
+
+
 def _dt(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _shift_text(text: str, shift: timedelta) -> str:
+    """Shift timestamps embedded in log text so they line up with the rebased incident dates."""
+    if not shift or not text:
+        return text
+
+    def iso(match: re.Match) -> str:
+        raw = match.group(0)
+        moved = _dt(raw) + shift
+        fmt = "%Y-%m-%dT%H:%M:%S.%f" if "." in raw else "%Y-%m-%dT%H:%M:%S"
+        out = moved.strftime(fmt)
+        return (out[:-3] if "." in raw else out) + "Z"
+
+    def pg(match: re.Match) -> str:
+        moved = datetime.fromisoformat(match.group(1)) + shift
+        return moved.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " UTC"
+
+    return _PG_IN_TEXT.sub(pg, _ISO_IN_TEXT.sub(iso, text))
 
 
 def rebase_shift(items: list[dict], now: datetime | None = None) -> timedelta:
@@ -50,7 +74,7 @@ async def seed_database(
             severity=Severity(item["severity"]),
             status=IncidentStatus(item["status"]),
             alert_text=item["alert_text"],
-            logs=item["logs"],
+            logs=_shift_text(item["logs"], shift),
             created_at=_dt(item["created_at"]) + shift,
             resolved_at=_dt(item["resolved_at"]) + shift if item.get("resolved_at") else None,
             root_cause=item.get("root_cause"),

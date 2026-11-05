@@ -1,0 +1,37 @@
+{
+  "description": "Fresh alerts to POST to /incidents during the demo (drop the _demo_note field or leave it; it is ignored).",
+  "alerts": [
+    {
+      "_demo_note": "Hero demo: 4th occurrence of the payments pool pattern. Agent should recall INC-1017/1009/1001.",
+      "title": "payments-api: connection pool exhausted, checkout payments failing",
+      "service": "payments-api",
+      "severity": "SEV1",
+      "alert_text": "[FIRING] PaymentsApiHighErrorRate: 5xx rate 38.2% on payments-api (threshold 5%) for 5m. p99 latency 30.4s. HikariPool-1 active=40/40, pending=212.",
+      "logs": "2026-11-05T14:02:17.300Z ERROR [http-nio-8080-exec-41] c.a.payments.api.ChargeController - POST /v1/charges failed (order_id=ord_k21x0p)\norg.springframework.jdbc.CannotGetJdbcConnectionException: Failed to obtain JDBC Connection; nested exception is java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is not available, request timed out after 30000ms.\n    at com.zaxxer.hikari.pool.HikariPool.createTimeoutException(HikariPool.java:696)\n    at com.aftermath.payments.service.ChargeService.charge(ChargeService.java:131)\n2026-11-05T14:02:29.900Z WARN  [HikariPool-1 housekeeper] com.zaxxer.hikari.pool.ProxyLeakTask - Connection leak detection triggered for org.postgresql.jdbc.PgConnection@4ac2d1f0 on thread chargeback-sync-4, stack trace follows\njava.lang.Exception: Apparent connection leak detected\n    at com.aftermath.payments.chargeback.ChargebackSyncJob.sync(ChargebackSyncJob.java:92)\n2026-11-05T14:02:30.200Z WARN  [HikariPool-1 housekeeper] com.zaxxer.hikari.pool.HikariPool - HikariPool-1 - Pool stats (total=40, active=40, idle=0, waiting=212)"
+    },
+    {
+      "_demo_note": "Friday-deploy 502s again. Agent should recall INC-1020/1011/1002 and say: roll back first.",
+      "title": "api-gateway: 502 Bad Gateway after deploy of v2.58.0",
+      "service": "api-gateway",
+      "severity": "SEV2",
+      "alert_text": "[FIRING] ApiGateway5xxRate: 502 rate 16.0% on api-gateway (threshold 2%). Started 3 minutes after deploy of api-gateway release v2.58.0.",
+      "logs": "2026-11-05T14:00:00.000Z INFO  deploy api-gateway release v2.58.0 rolled out (3/3 pods ready) by ci-bot, change: \"bump gateway-base chart to 2.0\"\n2026-11-05T14:02:24.800Z {\"ts\":\"2026-11-05T14:02:24.800Z\",\"method\":\"POST\",\"path\":\"/api/orders\",\"status\":502,\"upstream\":\"orders-svc:8080\",\"response_flags\":\"UC\",\"duration_ms\":2,\"body\":\"upstream connect error or disconnect/reset before headers. reset reason: connection termination\"}"
+    },
+    {
+      "_demo_note": "Batch OOM. Agent should recall INC-1018/1012/1005.",
+      "title": "notification-worker: OOMKilled during monthly statement batch",
+      "service": "notification-worker",
+      "severity": "SEV3",
+      "alert_text": "[FIRING] KubePodCrashLooping: notification-worker-8a1c2e-z9p4t restarted 5 times in 15m (last state: OOMKilled). email_queue depth 142,880.",
+      "logs": "2026-11-05T13:57:00.000Z INFO  notification_worker.jobs.monthly_statement: starting batch run_id=ms-2026-11 accounts=402,113\n$ kubectl -n notifications describe pod notification-worker-8a1c2e-z9p4t\n    Last State:     Terminated\n      Reason:       OOMKilled\n      Exit Code:    137\n    Limits:\n      memory:  1Gi"
+    },
+    {
+      "_demo_note": "Novel incident: nothing in memory matches. Shows the low-confidence path.",
+      "title": "search-api: Elasticsearch cluster red, search returning empty results",
+      "service": "search-api",
+      "severity": "SEV2",
+      "alert_text": "[FIRING] ElasticsearchClusterRed: cluster search-prod status RED, 14 unassigned primary shards.",
+      "logs": "2026-11-05T14:02:00.000Z WARN  search-api SearchPhaseExecutionException: all shards failed; index [products-v7] primary shard [3] is not active\n2026-11-05T14:02:20.000Z WARN  es-node-2 high disk watermark [90%] exceeded on [es-node-2][/usr/share/elasticsearch/data] free: 9.1gb[8.9%], shards will be relocated away from this node"
+    }
+  ]
+}
