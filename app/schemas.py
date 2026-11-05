@@ -13,7 +13,7 @@ EXAMPLE_ALERT = {
     "severity": "SEV1",
     "alert_text": (
         "[FIRING] PaymentsApiHighErrorRate: 5xx rate 38.2% (threshold 5%) on payments-api for 5m. "
-        "p99 latency 30.4s. HikariPool-1 active=50/50, pending=212."
+        "p99 latency 30.4s. HikariPool-1 active=40/40, pending=212."
     ),
     "logs": (
         "2026-11-05T14:02:11.204Z ERROR [http-nio-8080-exec-41] c.a.payments.ChargeController - Charge failed\n"
@@ -23,7 +23,7 @@ EXAMPLE_ALERT = {
         "    at com.zaxxer.hikari.pool.HikariPool.createTimeoutException(HikariPool.java:696)\n"
         "    at com.aftermath.payments.refund.RefundService.reconcile(RefundService.java:118)\n"
         "2026-11-05T14:02:12.881Z WARN  [HikariPool-1 housekeeper] c.z.h.p.HikariPool - HikariPool-1 - "
-        "Pool stats (total=50, active=50, idle=0, waiting=212)"
+        "Pool stats (total=40, active=40, idle=0, waiting=212)"
     ),
 }
 

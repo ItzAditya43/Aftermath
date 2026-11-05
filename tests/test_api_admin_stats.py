@@ -116,3 +116,19 @@ def test_openapi_documents_every_endpoint(client):
     assert schemas["ResolveRequest"]["examples"]
     assert "text/event-stream" in paths["/incidents/{incident_id}/analyze"]["get"]["responses"]["200"]["content"]
     assert client.get("/docs").status_code == 200
+
+
+def test_auto_seed_on_startup_and_mock_memory_survives_restart(settings):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    auto = settings.model_copy(update={"auto_seed": True})
+    with TestClient(create_app(auto)) as c:
+        assert len(c.get("/incidents").json()) == 20
+
+    # A fresh process (new app, same DB): the mock agent's memory is rebuilt from resolved incidents.
+    restarted = create_app(auto)
+    with TestClient(restarted) as c:
+        assert len(c.get("/incidents").json()) == 20  # not seeded twice
+        assert len(restarted.state.agent.memory) == 20
