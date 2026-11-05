@@ -1,0 +1,185 @@
+import type {
+  AnalysisEvent,
+  CreateIncidentRequest,
+  IncidentDetail,
+  IncidentSummary,
+  MemoryReference,
+  ResolveIncidentRequest,
+  StatsResponse,
+} from "./memory-types";
+
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number | null = null) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers: { Accept: "application/json", ...init?.headers },
+      cache: "no-store",
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new ApiError("The Aftermath API could not be reached. Check the API URL and connection.");
+  }
+
+  if (!response.ok) {
+    let message = `The API request failed (${response.status}).`;
+    try {
+      const body = await response.json() as { detail?: string | { msg?: string }[]; message?: string };
+      if (typeof body.detail === "string") message = body.detail;
+      else if (Array.isArray(body.detail) && body.detail[0]?.msg) message = body.detail[0].msg;
+      else if (body.message) message = body.message;
+    } catch {
+      // Keep the status-based message when an upstream error has no JSON body.
+    }
+    throw new ApiError(message, response.status);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+export function getIncidents(signal?: AbortSignal): Promise<IncidentSummary[]> {
+  return request<IncidentSummary[]>("/incidents?limit=100", { signal });
+}
+
+export function getIncident(id: string, signal?: AbortSignal): Promise<IncidentDetail> {
+  return request<IncidentDetail>(`/incidents/${encodeURIComponent(id)}`, { signal });
+}
+
+export function getIncidentMemories(id: string, signal?: AbortSignal): Promise<MemoryReference[]> {
+  return request<MemoryReference[]>(`/incidents/${encodeURIComponent(id)}/memories`, { signal });
+}
+
+export function getStats(signal?: AbortSignal): Promise<StatsResponse> {
+  return request<StatsResponse>("/stats", { signal });
+}
+
+export function createIncident(data: CreateIncidentRequest, signal?: AbortSignal): Promise<IncidentDetail> {
+  return request<IncidentDetail>("/incidents", {
+    method: "POST",
+    signal,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function resolveIncident(id: string, data: ResolveIncidentRequest, signal?: AbortSignal): Promise<IncidentDetail> {
+  return request<IncidentDetail>(`/incidents/${encodeURIComponent(id)}/resolve`, {
+    method: "POST",
+    signal,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+/**
+ * Fetch-based SSE is deliberately used instead of EventSource: the API does not
+ * support Last-Event-ID replay. A broken stream is surfaced for an explicit
+ * restart, avoiding an implicit duplicate analysis on automatic reconnect.
+ */
+export async function streamIncidentAnalysis(
+  id: string,
+  signal: AbortSignal,
+  onEvent: (event: AnalysisEvent) => void,
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/incidents/${encodeURIComponent(id)}/analyze`, {
+      method: "GET",
+      headers: { Accept: "text/event-stream" },
+      cache: "no-store",
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new ApiError("The investigation stream could not connect.");
+  }
+
+  if (!response.ok) {
+    let message = `The investigation request failed (${response.status}).`;
+    try {
+      const body = await response.json() as { detail?: string; message?: string };
+      message = body.detail ?? body.message ?? message;
+    } catch {
+      // Use the status message for non-JSON gateway responses.
+    }
+    throw new ApiError(message, response.status);
+  }
+  if (!response.body) throw new ApiError("The investigation response did not include a stream.");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventName = "message";
+  let dataLines: string[] = [];
+  let doneReceived = false;
+
+  const dispatch = () => {
+    if (!dataLines.length) {
+      eventName = "message";
+      return;
+    }
+    let event: AnalysisEvent;
+    try {
+      event = JSON.parse(dataLines.join("\n")) as AnalysisEvent;
+    } catch {
+      throw new ApiError("The investigation stream returned an invalid event.");
+    }
+    if (!event || typeof event !== "object" || typeof event.type !== "string") {
+      throw new ApiError("The investigation stream returned an unsupported event.");
+    }
+    if (eventName !== "message" && eventName !== event.type) {
+      throw new ApiError("The investigation stream event name did not match its payload.");
+    }
+    if (event.type === "error") {
+      onEvent(event);
+      throw new ApiError(event.message || "The investigation agent returned an error.");
+    }
+    onEvent(event);
+    if (event.type === "done") doneReceived = true;
+    eventName = "message";
+    dataLines = [];
+  };
+
+  const processLine = (line: string) => {
+    if (line === "") {
+      dispatch();
+      return;
+    }
+    if (line.startsWith(":")) return;
+    const separator = line.indexOf(":");
+    const field = separator === -1 ? line : line.slice(0, separator);
+    const value = separator === -1 ? "" : line.slice(separator + 1).replace(/^ /, "");
+    if (field === "event") eventName = value;
+    if (field === "data") dataLines.push(value);
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      let newline = buffer.indexOf("\n");
+      while (newline !== -1) {
+        processLine(buffer.slice(0, newline).replace(/\r$/, ""));
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+      }
+      if (done) break;
+    }
+    if (buffer) processLine(buffer.replace(/\r$/, ""));
+    dispatch();
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+
+  if (!doneReceived) throw new ApiError("The investigation stream ended before completion. Restart it to reconnect.");
+}
