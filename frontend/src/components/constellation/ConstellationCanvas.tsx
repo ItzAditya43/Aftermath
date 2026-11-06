@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointer
 import { createPortal } from "react-dom";
 import type { SceneCamera, SceneMemory, ScenePoint, SceneNode } from "@/lib/memory-types";
 import { createServiceEdges, drawScene } from "./draw-scene";
-import { createSceneLayout, createWakeRanks } from "./scene-layout";
+import { createSceneLayout, createWakeRanks, isCloserEligibleHit } from "./scene-layout";
 
 type Props = {
   memories: SceneMemory[];
@@ -29,7 +29,7 @@ type SceneInputs = Pick<Props, "memories" | "selectedId" | "active" | "consensus
   onSelect: Props["onSelect"];
 };
 
-const RECALL_TRAVEL_MS = 900;
+const RECALL_TRAVEL_MS = 1050;
 const INTRO_DURATION_MS = 6200;
 
 function placeInspectionCard(anchorX: number, anchorY: number, canvasRect: DOMRect): { left: number; top: number; width: number; maxHeight: number } {
@@ -40,7 +40,7 @@ function placeInspectionCard(anchorX: number, anchorY: number, canvasRect: DOMRe
   const preferredHeight = Math.min(compact ? 300 : 360, viewportHeight * (compact ? 0.42 : 0.4));
   const scale = Math.min(1, canvasRect.width / 1400, canvasRect.height / 820);
   const coreX = canvasRect.left + canvasRect.width / 2;
-  const coreY = canvasRect.top + canvasRect.height * (compact ? 0.62 : 0.44) + (compact ? 0 : -10);
+  const coreY = canvasRect.top + canvasRect.height * (compact ? 0.52 : 0.44) + (compact ? 0 : -10);
   const coreRadius = 112 * scale + 28;
   const headerBottom = Array.from(document.querySelectorAll<HTMLElement>("header, nav[aria-label='Incident panels']"))
     .filter((element) => element.getClientRects().length > 0)
@@ -123,6 +123,7 @@ export default function ConstellationCanvas(props: Props) {
     activeIncidentId: null as string | null,
     recallStartTimes: new Map<string, number>(),
     knownRecallIds: new Set<string>(),
+    angleTracking: new Map<string, { currentAngle: number; targetAngle: number; changeTime: number }>(),
     consensusAt: null as number | null,
     consensusSeen: false,
   });
@@ -132,9 +133,14 @@ export default function ConstellationCanvas(props: Props) {
   const [isDragging, setDragState] = useState(false);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [inspectionPlacement, setInspectionPlacement] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
+  const inspectionCardRef = useRef<HTMLElement | null>(null);
   const lastPlacementUpdateRef = useRef(0);
   const inspectionId = props.selectedId ?? hoveredId;
   const inspectionMemory = inspectionId ? props.memories.find((memory) => memory.id === inspectionId) ?? null : null;
+
+  useEffect(() => {
+    if (inspectionCardRef.current) inspectionCardRef.current.scrollTop = 0;
+  }, [inspectionId]);
 
   useEffect(() => {
     const updatePlacement = () => {
@@ -173,15 +179,19 @@ export default function ConstellationCanvas(props: Props) {
     if (replayReset || incidentReset || investigationReset) {
       runtime.recallStartTimes.clear();
       runtime.knownRecallIds.clear();
+      runtime.angleTracking.clear();
       runtime.consensusAt = null;
       runtime.consensusSeen = false;
       const recalled = props.memories.filter((memory) => memory.recalled).sort((a, b) => (b.relevance ?? 0) - (a.relevance ?? 0));
       recalled.forEach((memory, index) => {
         runtime.knownRecallIds.add(memory.id);
+        const stagger = (replayReset || (investigationReset && props.active)) && !props.reducedMotion
+          ? index * (replayReset ? 260 : 220)
+          : 0;
         const startAt = replayReset && !props.reducedMotion
-          ? 650 + index * 260
+          ? 650 + stagger
           : props.active && !props.reducedMotion
-            ? runtime.elapsed
+            ? runtime.elapsed + stagger
             : -RECALL_TRAVEL_MS;
         runtime.recallStartTimes.set(memory.id, startAt);
       });
@@ -253,6 +263,8 @@ export default function ConstellationCanvas(props: Props) {
         consensusAt: runtime.consensusAt,
         recallStartTimes: runtime.recallStartTimes,
         wakeRanks: inputs.wakeRanks,
+        reducedMotion: inputs.reducedMotion,
+        angleTracking: runtime.angleTracking,
       });
       if (animate) raf = window.requestAnimationFrame(draw);
     };
@@ -303,7 +315,7 @@ export default function ConstellationCanvas(props: Props) {
 
   const pickNode = (x: number, y: number): string | null => {
     let picked: string | null = null;
-    let distance = 20;
+    let distance = Number.POSITIVE_INFINITY;
     const introProgress = props.reducedMotion ? 1 : Math.min(1, runtimeRef.current.elapsed / INTRO_DURATION_MS);
     for (const [id, point] of positionsRef.current) {
       const memory = props.memories.find((candidate) => candidate.id === id);
@@ -312,8 +324,9 @@ export default function ConstellationCanvas(props: Props) {
         const revealStart = 0.04 + rank * 0.48;
         if (introProgress <= revealStart) continue;
       }
+      const hitRadius = memory?.recalled ? 26 : 22;
       const candidate = Math.hypot(point.x - x, point.y - y);
-      if (candidate < distance) {
+      if (isCloserEligibleHit(candidate, hitRadius, distance)) {
         distance = candidate;
         picked = id;
       }
@@ -394,6 +407,7 @@ export default function ConstellationCanvas(props: Props) {
       />
       {inspectionMemory && inspectionPlacement && typeof document !== "undefined" && createPortal(
         <section
+          ref={inspectionCardRef}
           className={`memory-inspection-card ${props.selectedId === inspectionMemory.id ? "is-locked" : "is-preview"}`}
           style={{ left: inspectionPlacement.left, top: inspectionPlacement.top, width: inspectionPlacement.width, maxHeight: inspectionPlacement.maxHeight }}
           aria-label={`Memory inspection: ${inspectionMemory.title}`}

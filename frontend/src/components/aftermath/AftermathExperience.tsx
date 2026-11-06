@@ -12,12 +12,15 @@ import {
   getStats,
   resolveIncident,
   streamIncidentAnalysis,
+  isApiOfflineError,
 } from "@/lib/api-client";
 import {
   applyAnalysisEvent,
   beginInvestigation,
   failInvestigation,
   hasConsensusEvidence,
+  hasSavedConsensusEvidence,
+  getIncidentListAvailability,
   initialInvestigationState,
   toMemoryEvent,
 } from "@/lib/investigation-state";
@@ -170,6 +173,8 @@ export default function AftermathExperience() {
   const [analysisRequestActive, setAnalysisRequestActive] = useState(false);
   const [busyAction, setBusyAction] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [incidentListError, setIncidentListError] = useState<string | null>(null);
+  const [apiOffline, setApiOffline] = useState(false);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   // Replay is an explicit visual reset; investigation attempts reset only the
@@ -185,11 +190,13 @@ export default function AftermathExperience() {
   const [dockExpanded, setDockExpanded] = useState(false);
   const [resolutionFeedback, setResolutionFeedback] = useState<{ incidentId: string; memorySaved: boolean | null } | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const analysisSnapshotRef = useRef<{ incidentId: string; state: InvestigationState } | null>(null);
   const runIdRef = useRef(0);
   const investigationRunStateRef = useRef<InvestigationState>(initialInvestigationState);
   const investigationCacheRef = useRef<Record<string, InvestigationState>>({});
   const incidentRef = useRef<IncidentDetail | null>(null);
   const activeIncidentIdRef = useRef<string | null>(null);
+  const incidentPanelRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => { incidentRef.current = incident; }, [incident]);
   useEffect(() => { activeIncidentIdRef.current = activeIncidentId; }, [activeIncidentId]);
@@ -208,11 +215,19 @@ export default function AftermathExperience() {
       if (controller.signal.aborted) return;
       if (incidentResult.status === "fulfilled") {
         setIncidents(incidentResult.value);
+        setIncidentListError(null);
         const currentId = activeIncidentIdRef.current;
         const nextSelected = currentId && incidentResult.value.some((item) => item.id === currentId)
           ? currentId
           : (incidentResult.value.find((item) => item.status !== "resolved") ?? incidentResult.value[0])?.id ?? null;
         if (nextSelected !== currentId) {
+          const currentRun = investigationRunStateRef.current;
+          if (currentId && (currentRun.status === "complete" || currentRun.status === "error")) {
+            investigationCacheRef.current[currentId] = currentRun;
+          } else if (currentId) {
+            delete investigationCacheRef.current[currentId];
+          }
+          if (analysisSnapshotRef.current?.incidentId === currentId) analysisSnapshotRef.current = null;
           streamAbortRef.current?.abort();
           runIdRef.current += 1;
           setAnalysisRequestActive(false);
@@ -227,10 +242,14 @@ export default function AftermathExperience() {
         }
         setActiveIncidentId(nextSelected);
       } else {
-        setApiError(incidentResult.reason instanceof Error ? incidentResult.reason.message : "Could not load incidents.");
+        const message = incidentResult.reason instanceof Error ? incidentResult.reason.message : "Could not load incidents.";
+        setIncidentListError(message);
+        setApiError(message);
       }
       if (statsResult.status === "fulfilled") setStats(statsResult.value);
       else setStatsError(statsResult.reason instanceof Error ? statsResult.reason.message : "Could not load statistics.");
+      const successfulRequest = incidentResult.status === "fulfilled" || statsResult.status === "fulfilled";
+      setApiOffline(successfulRequest ? false : isApiOfflineError(incidentResult.reason) || isApiOfflineError(statsResult.reason));
       setLoadingWorkspace(false);
     });
     return () => controller.abort();
@@ -259,6 +278,9 @@ export default function AftermathExperience() {
               phase: "idle",
               memories: memoriesResult.status === "fulfilled" ? memoriesResult.value.map(toMemoryEvent) : [],
               suggestion: incidentResult.value.last_suggestion,
+              consensus: memoriesResult.status === "fulfilled"
+                ? hasSavedConsensusEvidence(incidentResult.value.last_suggestion, memoriesResult.value.map(toMemoryEvent))
+                : false,
             }
             : initialInvestigationState;
           investigationCacheRef.current[activeIncidentId] = restoredInvestigation;
@@ -269,6 +291,8 @@ export default function AftermathExperience() {
       else setApiError(incidentResult.reason instanceof Error ? incidentResult.reason.message : "Could not load incident details.");
       if (memoriesResult.status === "fulfilled") setMemoryRefs(memoriesResult.value);
       else if (incidentResult.status === "fulfilled") setApiError(memoriesResult.reason instanceof Error ? memoriesResult.reason.message : "Could not load incident memories.");
+      const successfulRequest = incidentResult.status === "fulfilled" || memoriesResult.status === "fulfilled";
+      setApiOffline(successfulRequest ? false : isApiOfflineError(incidentResult.reason) || isApiOfflineError(memoriesResult.reason));
       setLoadingIncident(false);
     });
     return () => controller.abort();
@@ -387,6 +411,14 @@ export default function AftermathExperience() {
   const previouslyRecalled = activeIncidentId ? previousMemoryRefs[activeIncidentId] ?? [] : [];
   const streamActive = investigation.status === "connecting" || investigation.status === "streaming";
 
+  const openCreateIncident = () => {
+    if (apiOffline) return;
+    setShowCreate(true);
+    setShowResolve(false);
+    setMobilePanel("incident");
+    requestAnimationFrame(() => incidentPanelRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
+  };
+
   const selectMemory = (id: string | null) => {
     setFocusedMemoryId(id);
     if (id) setMobilePanel(null);
@@ -400,6 +432,7 @@ export default function AftermathExperience() {
     } else if (activeIncidentId) {
       delete investigationCacheRef.current[activeIncidentId];
     }
+    if (analysisSnapshotRef.current?.incidentId === activeIncidentId) analysisSnapshotRef.current = null;
     streamAbortRef.current?.abort();
     runIdRef.current += 1;
     setAnalysisRequestActive(false);
@@ -433,6 +466,8 @@ export default function AftermathExperience() {
     const controller = new AbortController();
     streamAbortRef.current = controller;
     const runId = ++runIdRef.current;
+    const previousInvestigation = investigationRunStateRef.current;
+    analysisSnapshotRef.current = { incidentId, state: previousInvestigation };
     const isCurrentRun = () => !controller.signal.aborted
       && runId === runIdRef.current
       && activeIncidentIdRef.current === incidentId;
@@ -463,6 +498,12 @@ export default function AftermathExperience() {
         setInvestigation(investigationRunStateRef.current);
       });
       if (!isCurrentRun()) return;
+      setApiOffline(false);
+      if (streamAbortRef.current === controller) {
+        streamAbortRef.current = null;
+        setAnalysisRequestActive(false);
+      }
+      analysisSnapshotRef.current = null;
       setLoadingIncident(true);
       const [detailResult, memoryResult, incidentListResult, statsResult] = await Promise.allSettled([
         getIncident(incidentId, controller.signal),
@@ -490,18 +531,26 @@ export default function AftermathExperience() {
       } else refreshErrors.push(detailResult.reason instanceof Error ? `Incident details: ${detailResult.reason.message}` : "Incident details could not refresh.");
       if (memoryResult.status === "fulfilled") setMemoryRefs(memoryResult.value);
       else refreshErrors.push(memoryResult.reason instanceof Error ? `Historical memories: ${memoryResult.reason.message}` : "Historical memories could not refresh.");
-      if (incidentListResult.status === "fulfilled") setIncidents(incidentListResult.value);
-      else refreshErrors.push(incidentListResult.reason instanceof Error ? `Incident status: ${incidentListResult.reason.message}` : "Incident status could not refresh.");
+      if (incidentListResult.status === "fulfilled") { setIncidents(incidentListResult.value); setIncidentListError(null); }
+      else {
+        const message = incidentListResult.reason instanceof Error ? incidentListResult.reason.message : "Incident status could not refresh.";
+        setIncidentListError(message);
+        refreshErrors.push(`Incident status: ${message}`);
+      }
       if (statsResult.status === "fulfilled") { setStats(statsResult.value); setStatsError(null); }
       else setStatsError(statsResult.reason instanceof Error ? statsResult.reason.message : "Statistics could not be refreshed.");
+      if ([detailResult, memoryResult, incidentListResult, statsResult].some((result) => result.status === "fulfilled")) setApiOffline(false);
+      else if ([detailResult, memoryResult, incidentListResult, statsResult].some((result) => result.status === "rejected" && isApiOfflineError(result.reason))) setApiOffline(true);
       if (refreshErrors.length) setApiError(`Investigation completed, but some data could not refresh: ${refreshErrors.join(" · ")}`);
     } catch (error) {
       if (!isCurrentRun()) return;
+      if (isApiOfflineError(error)) setApiOffline(true);
       const message = error instanceof Error ? error.message : "The investigation stream ended unexpectedly.";
-      investigationRunStateRef.current = failInvestigation(investigationRunStateRef.current, message);
+      investigationRunStateRef.current = failInvestigation(investigationRunStateRef.current, message, previousInvestigation);
       investigationCacheRef.current[incidentId] = investigationRunStateRef.current;
       setInvestigation(investigationRunStateRef.current);
     } finally {
+      if (analysisSnapshotRef.current?.incidentId === incidentId) analysisSnapshotRef.current = null;
       if (streamAbortRef.current === controller) {
         streamAbortRef.current = null;
         setAnalysisRequestActive(false);
@@ -515,6 +564,10 @@ export default function AftermathExperience() {
     setApiError(null);
     try {
       const created = await createIncident(data);
+      setApiOffline(false);
+      const previousSnapshot = analysisSnapshotRef.current;
+      if (previousSnapshot) delete investigationCacheRef.current[previousSnapshot.incidentId];
+      analysisSnapshotRef.current = null;
       streamAbortRef.current?.abort();
       runIdRef.current += 1;
       setAnalysisRequestActive(false);
@@ -533,6 +586,7 @@ export default function AftermathExperience() {
       setShowCreate(false);
       setReloadKey((value) => value + 1);
     } catch (error) {
+      if (isApiOfflineError(error)) setApiOffline(true);
       setApiError(error instanceof Error ? error.message : "Could not create the incident.");
     } finally {
       setBusyAction(false);
@@ -547,15 +601,24 @@ export default function AftermathExperience() {
     try {
       const activeStream = streamAbortRef.current;
       const cancelingActiveStream = activeStream !== null && !activeStream.signal.aborted;
+      const previousInvestigation = analysisSnapshotRef.current?.incidentId === resolvedId
+        ? analysisSnapshotRef.current.state
+        : investigationRunStateRef.current;
       activeStream?.abort();
       runIdRef.current += 1;
       setAnalysisRequestActive(false);
       if (cancelingActiveStream) {
-        investigationRunStateRef.current = failInvestigation(investigationRunStateRef.current, "The investigation was stopped because the resolution was submitted.");
+        investigationRunStateRef.current = failInvestigation(
+          investigationRunStateRef.current,
+          "The investigation was stopped because the resolution was submitted.",
+          previousInvestigation,
+        );
         investigationCacheRef.current[resolvedId] = investigationRunStateRef.current;
         setInvestigation(investigationRunStateRef.current);
       }
+      analysisSnapshotRef.current = null;
       const resolved = await resolveIncident(resolvedId, data);
+      setApiOffline(false);
       setResolutionFeedback({ incidentId: resolvedId, memorySaved: typeof resolved.memory_saved === "boolean" ? resolved.memory_saved : null });
       if (activeIncidentIdRef.current === resolvedId) {
         incidentRef.current = resolved;
@@ -567,8 +630,12 @@ export default function AftermathExperience() {
         getIncidents(), getIncident(resolvedId), getIncidentMemories(resolvedId), getStats(),
       ]);
       const refreshErrors: string[] = [];
-      if (listResult.status === "fulfilled") setIncidents(listResult.value);
-      else refreshErrors.push(listResult.reason instanceof Error ? `Incident status: ${listResult.reason.message}` : "Incident status could not refresh.");
+      if (listResult.status === "fulfilled") { setIncidents(listResult.value); setIncidentListError(null); }
+      else {
+        const message = listResult.reason instanceof Error ? listResult.reason.message : "Incident status could not refresh.";
+        setIncidentListError(message);
+        refreshErrors.push(`Incident status: ${message}`);
+      }
       if (activeIncidentIdRef.current === resolvedId) {
         if (detailResult.status === "fulfilled") { incidentRef.current = detailResult.value; setIncident(detailResult.value); }
         else refreshErrors.push(detailResult.reason instanceof Error ? `Incident details: ${detailResult.reason.message}` : "Incident details could not refresh.");
@@ -577,8 +644,11 @@ export default function AftermathExperience() {
       }
       if (statsResult.status === "fulfilled") { setStats(statsResult.value); setStatsError(null); }
       else setStatsError(statsResult.reason instanceof Error ? statsResult.reason.message : "Statistics could not be refreshed.");
+      if ([listResult, detailResult, referencesResult, statsResult].some((result) => result.status === "fulfilled")) setApiOffline(false);
+      else if ([listResult, detailResult, referencesResult, statsResult].some((result) => result.status === "rejected" && isApiOfflineError(result.reason))) setApiOffline(true);
       if (refreshErrors.length) setApiError(`Resolution was recorded, but some data could not refresh: ${refreshErrors.join(" · ")}`);
     } catch (error) {
+      if (isApiOfflineError(error)) setApiOffline(true);
       setApiError(error instanceof Error ? error.message : "Could not save this resolution.");
     } finally {
       if (activeIncidentIdRef.current === resolvedId) setLoadingIncident(false);
@@ -586,7 +656,8 @@ export default function AftermathExperience() {
     }
   };
 
-  const phaseLabel = loadingIncident ? "LOADING INCIDENT CONTEXT"
+  const phaseLabel = apiOffline ? "API OFFLINE"
+    : loadingIncident ? "LOADING INCIDENT CONTEXT"
     : investigation.consensus ? "CONSENSUS EVIDENCE THRESHOLD MET"
     : investigation.status === "connecting" ? "CONNECTING TO INVESTIGATION"
       : investigation.status === "streaming" ? (investigation.phase === "recalling" ? `RECALLING ${investigation.memories.length} INCIDENT${investigation.memories.length === 1 ? "" : "S"}` : "SYNTHESIZING EVIDENCE")
@@ -597,13 +668,22 @@ export default function AftermathExperience() {
               : incident?.status === "resolved" ? "RESOLVED · READY TO RE-ANALYZE" : "MEMORY FIELD READY";
 
   const playbookSuggestion = investigation.suggestion;
+  const suggestionConfidenceLabel = playbookSuggestion?.confidence_calibrated === true
+    ? `${Math.round(playbookSuggestion.confidence * 100)}%`
+    : playbookSuggestion ? `rank ${playbookSuggestion.confidence.toFixed(2)}` : "";
+  const suggestionBadgeLabel = investigation.consensus
+    ? "CONSENSUS EVIDENCE"
+    : playbookSuggestion?.confidence_calibrated === true
+      ? "SUGGESTION · NOT CONSENSUS"
+      : "SUGGESTION · RANK SCORE";
   const analyzeButtonLabel = analysisRequestActive
     ? "Investigation running"
     : incident?.status === "open"
       ? "Analyze incident"
       : "Re-analyze";
-  const memoryAssistedAverage = stats?.avg_ttr_with_memory;
-  const memoryFreeAverage = stats?.avg_ttr_without_memory;
+  const memoryAssistedAverage = apiOffline ? null : stats?.avg_ttr_with_memory;
+  const memoryFreeAverage = apiOffline ? null : stats?.avg_ttr_without_memory;
+  const incidentListAvailability = getIncidentListAvailability(loadingWorkspace, incidentListError, apiOffline, incidents.length);
 
   const retryWorkspace = () => {
     setLoadingWorkspace(true);
@@ -646,11 +726,11 @@ export default function AftermathExperience() {
           </div>
           <div className="pointer-events-auto flex items-center gap-2 md:gap-4">
             <div className="hidden items-center gap-4 font-mono text-[9px] tracking-[0.08em] text-[#7A8DB5] lg:flex">
-              <span>INCIDENTS <b className="text-[#DDD6FE]">{stats?.total_incidents ?? "—"}</b></span>
-              <span>OPEN <b className="text-[#DDD6FE]">{stats?.open ?? "—"}</b></span>
-              <span>AVG TTR <b className="text-[#DDD6FE]">{stats?.avg_time_to_resolve_minutes == null ? "—" : formatMinutes(stats.avg_time_to_resolve_minutes)}</b></span>
+              <span>INCIDENTS <b className="text-[#DDD6FE]">{apiOffline ? "—" : stats?.total_incidents ?? "—"}</b></span>
+              <span>OPEN <b className="text-[#DDD6FE]">{apiOffline || !stats ? "—" : stats.open + stats.investigating}</b></span>
+              <span>AVG TTR <b className="text-[#DDD6FE]">{apiOffline || stats?.avg_time_to_resolve_minutes == null ? "—" : formatMinutes(stats.avg_time_to_resolve_minutes)}</b></span>
             </div>
-            <button type="button" className="cosmic-quiet !px-2.5" onClick={() => { setShowCreate((value) => !value); setShowResolve(false); }} aria-expanded={showCreate}><Plus size={13} /> <span className="hidden sm:inline">New incident</span></button>
+            <button type="button" className="cosmic-quiet !px-2.5" onClick={openCreateIncident} disabled={apiOffline} aria-expanded={showCreate}><Plus size={13} /> <span className="hidden sm:inline">New incident</span></button>
           </div>
         </header>
 
@@ -663,21 +743,32 @@ export default function AftermathExperience() {
           </button>
         </nav>
 
-        <aside id="incident-context" className={`pointer-events-none absolute left-7 top-[78px] z-20 flex max-h-[calc(100svh-200px)] w-[260px] flex-col gap-3 overflow-y-auto overscroll-contain max-lg:left-3 max-lg:top-[74px] max-lg:w-[260px] ${mobilePanel === "incident" ? "max-md:left-2 max-md:right-2 max-md:top-[114px] max-md:z-40 max-md:w-auto max-md:max-h-[calc(100svh-250px)] max-md:overflow-y-auto" : "max-md:hidden"}`} aria-label="Incident context">
+        <aside ref={incidentPanelRef} id="incident-context" className={`incident-context-panel pointer-events-none absolute left-7 top-[78px] z-20 flex w-[260px] flex-col gap-3 overflow-y-auto overscroll-contain max-lg:left-3 max-lg:top-[74px] max-lg:w-[260px] ${mobilePanel === "incident" ? "max-md:left-2 max-md:right-2 max-md:top-[114px] max-md:z-40 max-md:w-auto" : "max-md:hidden"}`} aria-label="Incident context">
           <FlankCard className="pointer-events-auto">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-[#7A8DB5]">API data · origin unreported</p>
-              <button type="button" onClick={() => setShowCreate((value) => !value)} aria-label="Create incident" className="grid min-h-11 min-w-11 place-items-center rounded text-[#A855F7] hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#A855F7]"><Plus size={14} /></button>
+              <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-[#7A8DB5]">Incident workspace</p>
+              <button type="button" onClick={openCreateIncident} disabled={apiOffline} aria-label="Create incident" className="grid min-h-11 min-w-11 place-items-center rounded text-[#A855F7] hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#A855F7] disabled:cursor-not-allowed disabled:opacity-40"><Plus size={14} /></button>
             </div>
-            {showCreate ? (
+            {incidentListAvailability === "offline" ? (
+              <div className="py-3">
+                <p className="text-sm font-semibold">Can&apos;t reach the API.</p>
+                <p className="mt-1 text-[11px] leading-relaxed text-[#7A8DB5]">Incident data and memory statistics are unavailable while disconnected.</p>
+                <button type="button" onClick={retryWorkspace} className="cosmic-quiet mt-3 w-full">Retry API</button>
+              </div>
+            ) : incidentListAvailability === "error" ? (
+              <div className="py-3">
+                <p className="text-sm font-semibold">Could not load incidents.</p>
+                <button type="button" onClick={retryWorkspace} className="cosmic-quiet mt-3 w-full">Retry API</button>
+              </div>
+            ) : showCreate ? (
               <CreateIncidentForm busy={busyAction} onCancel={() => setShowCreate(false)} onSubmit={onCreateIncident} />
             ) : loadingWorkspace ? (
               <div className="flex items-center gap-2 py-4 text-xs text-[#7A8DB5]"><LoaderCircle size={14} className="animate-spin" />Loading incident memory</div>
-            ) : incidents.length === 0 ? (
+            ) : incidentListAvailability === "empty" ? (
               <div className="py-2">
                 <p className="text-sm font-semibold">No incidents are available.</p>
-                <p className="mt-1 text-[11px] leading-relaxed text-[#7A8DB5]">Connect the API or create an incident to start an investigation.</p>
-                <button type="button" onClick={() => setShowCreate(true)} className="cosmic-primary mt-3 w-full"><Plus size={14} /> Create incident</button>
+                <p className="mt-1 text-[11px] leading-relaxed text-[#7A8DB5]">Create an incident to start an investigation.</p>
+                <button type="button" onClick={openCreateIncident} className="cosmic-primary mt-3 w-full"><Plus size={14} /> Create incident</button>
               </div>
             ) : (
               <>
@@ -751,7 +842,7 @@ export default function AftermathExperience() {
           </FlankCard>
 
           <FlankCard className="pointer-events-auto !p-3 max-lg:hidden">
-            <div className="flex items-center justify-between font-mono text-[9px] uppercase tracking-[0.14em] text-[#7A8DB5]"><span>Memory bank</span><b className="text-[#38BDF8]">{sceneMemories.length} incidents</b></div>
+            <div className="flex items-center justify-between font-mono text-[9px] uppercase tracking-[0.14em] text-[#7A8DB5]"><span>Memory bank</span><b className="text-[#38BDF8]">{apiOffline ? "—" : `${sceneMemories.length} incidents`}</b></div>
             <div className="mt-2 h-[3px] overflow-hidden rounded-full bg-[rgba(168,85,247,0.15)]"><div className="h-full bg-gradient-to-r from-[#7C3AED] via-[#A855F7] to-[#FACC15] transition-[width] duration-700" style={{ width: `${sceneMemories.length ? recalls.length / sceneMemories.length * 100 : 0}%` }} /></div>
             <div className="mt-2 flex items-center justify-between text-[9px] text-[#7A8DB5]"><span>{recalls.length} recalled memories</span><span>{investigation.status === "idle" ? "Historical" : "Current run"}</span></div>
             <div className="mt-2 flex flex-wrap gap-[4px]" aria-label={`${recalls.length} recalled memories`}>
@@ -798,18 +889,18 @@ export default function AftermathExperience() {
             <>
             <div className="grid grid-cols-1 gap-2 p-3 lg:hidden">
               <div className="flex min-w-0 items-center justify-between gap-2">
-                <div className="min-w-0"><div className="font-mono text-[9px] tracking-[0.04em] text-[#FACC15]">{investigation.consensus ? "CONSENSUS EVIDENCE" : "SUGGESTION · NOT CONSENSUS"} · {Math.round(playbookSuggestion.confidence * 100)}%</div><p className="mt-1 line-clamp-1 text-[11px] font-semibold">{playbookSuggestion.likely_root_cause}</p></div>
+                <div className="min-w-0"><div className="font-mono text-[9px] tracking-[0.04em] text-[#FACC15]">{suggestionBadgeLabel} · {suggestionConfidenceLabel}</div><p className="mt-1 line-clamp-1 text-[11px] font-semibold">{playbookSuggestion.likely_root_cause}</p></div>
                 <button type="button" className="cosmic-quiet min-h-10 shrink-0 !px-3" aria-expanded={dockExpanded} onClick={() => setDockExpanded((value) => !value)}>{dockExpanded ? "Less" : "Details"}</button>
               </div>
               {dockExpanded && <div className="space-y-3 border-t border-white/10 pt-3">
                 <div><p className="mb-2 font-mono text-[9px] uppercase tracking-wider text-[#A855F7]">Suggested response · backend analysis</p><ol className="space-y-2">{playbookSuggestion.steps.map((step, index) => <li key={`${index}-${step}`} className="flex gap-2 text-[11px] leading-relaxed text-[#C4D0E6]"><span className="text-[#FACC15]">0{index + 1}</span><span>{step}</span></li>)}</ol>{playbookSuggestion.steps.length === 0 && <p className="text-[11px] text-[#7A8DB5]">The backend did not return action steps.</p>}</div>
-                {playbookSuggestion.warnings.length > 0 && <p className="text-[10px] text-[#FACC15]">Avoid: {playbookSuggestion.warnings.join(" · ")}</p>}
+                {playbookSuggestion.warnings.length > 0 && <p className="text-[10px] text-[#FACC15]"><b>Warnings:</b> {playbookSuggestion.warnings.join(" · ")}</p>}
                 <p className="font-mono text-[9px] leading-relaxed text-[#9EACC9]">{investigation.memories.length} recalled · Avg TTR with memory: {memoryAssistedAverage == null ? "Not available" : formatMinutes(memoryAssistedAverage)} · without: {memoryFreeAverage == null ? "Not available" : formatMinutes(memoryFreeAverage)}</p>
               </div>}
             </div>
             <div className="hidden min-h-[126px] grid-cols-1 gap-4 p-4 lg:grid lg:grid-cols-[1fr_2.2fr_0.8fr] lg:gap-6 lg:px-6">
               <div className="min-w-0 border-b border-[rgba(250,204,21,0.15)] pb-3 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-5">
-                <div className="inline-flex items-center gap-1.5 rounded-full border border-[rgba(250,204,21,0.3)] bg-[rgba(250,204,21,0.09)] px-2.5 py-1 font-mono text-[9px] tracking-[0.08em] text-[#FACC15]"><Sparkles size={11} /> {investigation.consensus ? "CONSENSUS EVIDENCE" : "SUGGESTION · NOT CONSENSUS"} · {Math.round(playbookSuggestion.confidence * 100)}%</div>
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-[rgba(250,204,21,0.3)] bg-[rgba(250,204,21,0.09)] px-2.5 py-1 font-mono text-[9px] tracking-[0.08em] text-[#FACC15]"><Sparkles size={11} /> {suggestionBadgeLabel} · {suggestionConfidenceLabel}</div>
                 <h2 className="mt-2 break-words text-[14px] font-bold leading-snug text-[#DDD6FE]">{playbookSuggestion.likely_root_cause}</h2>
               </div>
               <div className="flex min-w-0 flex-col justify-center gap-2 lg:px-2">
@@ -818,7 +909,7 @@ export default function AftermathExperience() {
                   {playbookSuggestion.steps.map((step, index) => <li key={`${index}-${step}`} className="flex min-w-0 gap-2 break-words text-[12px] leading-relaxed text-[#DDD6FE]"><span className="mt-px shrink-0 font-mono text-[10px] text-[#38BDF8]">{String(index + 1).padStart(2, "0")}</span><span className="min-w-0 break-words">{step}</span></li>)}
                   {playbookSuggestion.steps.length === 0 && <li className="text-[12px] text-[#A6A0BC]">The backend did not return action steps.</li>}
                 </ol>
-                {playbookSuggestion.warnings.length > 0 && <p className="break-words whitespace-normal text-[11px] leading-relaxed text-[#FEF08A]">Avoid: {playbookSuggestion.warnings.join(" · ")}</p>}
+                {playbookSuggestion.warnings.length > 0 && <p className="break-words whitespace-normal text-[11px] leading-relaxed text-[#FEF08A]"><b>Warnings:</b> {playbookSuggestion.warnings.join(" · ")}</p>}
               </div>
               <div className="flex min-w-0 flex-col justify-center gap-2 border-t border-[rgba(56,189,248,0.14)] pt-3 font-mono text-[10px] leading-relaxed text-[#A6A0BC] lg:border-l lg:border-t-0 lg:pl-5 lg:pt-0">
                 <span>HISTORICAL RECURRENCE <b className="text-[#FACC15]">{investigation.memories.length} incidents</b></span>

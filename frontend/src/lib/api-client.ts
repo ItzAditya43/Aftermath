@@ -12,10 +12,26 @@ import type {
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number | null = null, readonly code: string | null = null) {
+  readonly status: number | null;
+  readonly code: string | null;
+  readonly offline: boolean;
+
+  constructor(
+    message: string,
+    status: number | null = null,
+    code: string | null = null,
+    offline = false,
+  ) {
     super(message);
     this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.offline = offline;
   }
+}
+
+export function isApiOfflineError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.offline;
 }
 
 type ErrorBody = {
@@ -61,7 +77,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
-    throw new ApiError("The Aftermath API could not be reached. Check the API URL and connection.");
+    throw new ApiError("The Aftermath API could not be reached. Check the API URL and connection.", null, null, true);
   }
 
   if (!response.ok) {
@@ -125,7 +141,7 @@ export async function streamIncidentAnalysis(
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
-    throw new ApiError("The investigation stream could not connect.");
+    throw new ApiError("The investigation stream could not connect.", null, null, true);
   }
 
   if (!response.ok) {

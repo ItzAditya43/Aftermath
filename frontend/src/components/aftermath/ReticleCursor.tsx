@@ -31,19 +31,35 @@ export default function ReticleCursor({ nodeHovered }: Props) {
 
     const animate = () => {
       frame = 0;
-      x += (targetX - x) * 0.28;
-      y += (targetY - y) * 0.28;
+      const dx = targetX - x;
+      const dy = targetY - y;
+      const dist = Math.hypot(dx, dy);
+
+      if (dist < 0.35) {
+        x = targetX;
+        y = targetY;
+      } else {
+        // High-responsiveness tracking: fast, immediate tracking without micro-jitter
+        const factor = dist > 40 ? 0.78 : 0.68;
+        x += dx * factor;
+        y += dy * factor;
+      }
       cursor.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
-      if (Math.abs(targetX - x) + Math.abs(targetY - y) > 0.2) frame = window.requestAnimationFrame(animate);
+      if (Math.abs(targetX - x) + Math.abs(targetY - y) > 0.15) frame = window.requestAnimationFrame(animate);
     };
     const move = (event: PointerEvent) => {
       if (!enabled) return;
       document.body.classList.remove("keyboard-navigation");
       targetX = event.clientX;
       targetY = event.clientY;
+      if (x < 0 || y < 0) {
+        x = targetX;
+        y = targetY;
+        cursor.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+      }
       const target = event.target instanceof Element ? event.target : null;
       const textInput = Boolean(target?.closest("input:not([type=button]):not([type=submit]), textarea, [contenteditable=true]"));
-      const interactive = Boolean(target?.closest("button, a, select, [role=button], canvas"));
+      const interactive = Boolean(target?.closest("button, a, select, [role=button]"));
       cursor.dataset.hidden = textInput || !visible ? "true" : "false";
       cursor.dataset.interactive = interactive || nodeHoveredRef.current ? "true" : "false";
       cursor.dataset.nodeHovered = nodeHoveredRef.current ? "true" : "false";
