@@ -30,7 +30,7 @@ from .correlation import correlate_events
 from .debate import DebateOutcome, run_debate
 from .evidence import Evidence, EvidenceKind, EvidenceLedger
 from .ingestion import ingest_text
-from .llm import LLMBudget, LLMError, LLMRequest, LLMRouter
+from .llm import LLMBudget, LLMError, LLMErrorKind, LLMRequest, LLMRouter
 from .memory import IncidentMemory, Lesson, MemoryQuery, RecalledIncident, derive_lessons
 from .models import NormalizedEvent, Severity
 from .prompts import (ASSESS_SYSTEM, PLAN_SYSTEM, LLMAssessment, LLMPlan, assess_prompt, confidence_words, fence)
@@ -332,6 +332,17 @@ class _Run:
     def out_of_time(self) -> bool:
         return time.monotonic() > self.deadline
 
+    async def within_deadline(self, coro):
+        """Await an AI call, but never past the investigation deadline (one call may retry and fail over)."""
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0.5:
+            coro.close()
+            raise LLMError(LLMErrorKind.TIMEOUT, "investigation time limit reached")
+        try:
+            return await asyncio.wait_for(coro, timeout=remaining)
+        except asyncio.TimeoutError:
+            raise LLMError(LLMErrorKind.TIMEOUT, "investigation time limit reached") from None
+
     def to(self, phase: Phase) -> None:
         self.sm.to(phase)
 
@@ -564,7 +575,8 @@ class _Run:
             lessons=[lesson.message for lesson in lessons][:6]),
             task="assess", max_output_tokens=1400, temperature=0.1)
         try:
-            assessment, result = await router.complete_structured(request, LLMAssessment, budget=self.budget)
+            assessment, result = await self.within_deadline(
+                router.complete_structured(request, LLMAssessment, budget=self.budget))
         except LLMError as exc:
             self.llm_errors.append(str(exc)[:300])
             self.degraded.append(f"AI assessment unavailable ({exc.kind.value}); deterministic ranking used")
@@ -714,9 +726,9 @@ class _Run:
                              if not any(n == s.name for n, _ in executed)],
                    "service": self.case.service}
         try:
-            plan, result = await self.engine.router.complete_structured(
+            plan, result = await self.within_deadline(self.engine.router.complete_structured(
                 LLMRequest.of(PLAN_SYSTEM, fence(payload), task="plan", max_output_tokens=600, temperature=0.1),
-                LLMPlan, budget=self.budget)
+                LLMPlan, budget=self.budget))
         except LLMError as exc:
             self.llm_errors.append(str(exc)[:300])
             self.record("llm_plan_failed", f"AI planning unavailable ({exc.kind.value}); heuristic plan used",

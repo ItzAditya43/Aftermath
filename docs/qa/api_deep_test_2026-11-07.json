@@ -1,0 +1,164 @@
+[
+ {
+  "test": "rejects uppercase service",
+  "ok": true,
+  "detail": 422
+ },
+ {
+  "test": "rejects logs over 200k chars",
+  "ok": true,
+  "detail": 422
+ },
+ {
+  "test": "rejects missing fields",
+  "ok": true,
+  "detail": 422
+ },
+ {
+  "test": "analyze unknown incident -> 404",
+  "ok": true,
+  "detail": 404
+ },
+ {
+  "test": "demo payments-api",
+  "ok": true,
+  "detail": {
+   "secs": 2.0,
+   "memories": 3,
+   "root": "Likely: A database connection leak in payments-api is the most likely root cause, exhausting the Hikari pool and causing checkout failures.",
+   "warnings": 5,
+   "confidence": 0.95,
+   "doubled_likely": false
+  }
+ },
+ {
+  "test": "demo api-gateway",
+  "ok": true,
+  "detail": {
+   "secs": 2.9,
+   "memories": 3,
+   "root": "Likely: A regression introduced by the v2.58.0 deployment likely altered upstream idle_timeout or related configuration, causing upstream connection r",
+   "warnings": 0,
+   "confidence": 0.82,
+   "doubled_likely": false
+  }
+ },
+ {
+  "test": "demo notification-worker",
+  "ok": true,
+  "detail": {
+   "secs": 49.9,
+   "memories": 3,
+   "root": "Likely: The notification-worker ran out of memory because the monthly statement batch job attempted to load and process all 402,113 recipient accounts",
+   "warnings": 3,
+   "confidence": 0.84,
+   "doubled_likely": false
+  }
+ },
+ {
+  "test": "demo search-api",
+  "ok": false,
+  "detail": {
+   "secs": 1.8,
+   "memories": 0,
+   "root": "Possibly: Disk space exhaustion on es-node-2 prevented shard relocation, leaving primary shards unassigned and causing the cluster to become RED and s",
+   "warnings": 0,
+   "confidence": 0.29,
+   "doubled_likely": false
+  }
+ },
+ {
+  "test": "prompt injection ignored",
+  "ok": true,
+  "detail": {
+   "root": "Likely: The payments‑api service experienced a connection pool exhaustion due to a leak in the RefundRetryHandler, causi"
+  }
+ },
+ {
+  "test": "secrets not echoed in analysis",
+  "ok": true,
+  "detail": "none"
+ },
+ {
+  "test": "raw incident API returns stored logs verbatim (incl. secrets)",
+  "ok": false,
+  "detail": "stored as submitted"
+ },
+ {
+  "test": "alert-only incident handled",
+  "ok": true,
+  "detail": {
+   "secs": 94.2,
+   "root": "Possibly: The root cause remains undetermined due to a lack of telemetry beyond a single user slowness complaint."
+  }
+ },
+ {
+  "test": "binary/emoji garbage logs handled",
+  "ok": true,
+  "detail": 200
+ },
+ {
+  "test": "~180KB logs analysed",
+  "ok": true,
+  "detail": {
+   "secs": 2.7,
+   "root": "Possibly: An out‑of‑memory kill of orders‑api caused the service to become unresponsive, leading to "
+  }
+ },
+ {
+  "test": "4 concurrent analyses complete",
+  "ok": true,
+  "detail": {
+   "wall_secs": 5.2,
+   "each": [
+    5.0,
+    4.6,
+    3.3,
+    5.2
+   ]
+  }
+ },
+ {
+  "test": "double analyze of same incident",
+  "ok": true,
+  "detail": [
+   [
+    200,
+    [
+     "done"
+    ]
+   ],
+   [
+    200,
+    [
+     "done"
+    ]
+   ]
+  ]
+ },
+ {
+  "test": "resolve once ok, twice rejected",
+  "ok": true,
+  "detail": [
+   200,
+   409
+  ]
+ },
+ {
+  "test": "re-analyze resolved incident",
+  "ok": true,
+  "detail": 200
+ },
+ {
+  "test": "learns from resolution (recalls it next time)",
+  "ok": true,
+  "detail": {
+   "recalled": [
+    "INC-1030",
+    "INC-1017",
+    "INC-1009",
+    "INC-1001"
+   ]
+  }
+ }
+]

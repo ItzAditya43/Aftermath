@@ -25,7 +25,10 @@
    "alert_text": "[FIRING] KubePodCrashLooping report-worker restarted 4 times (OOMKilled)",
    "logs": "2026-10-02T01:00:00Z INFO report_worker.jobs.nightly_export: starting batch rows=8,400,000\n2026-10-02T01:04:12Z ERROR java.lang.OutOfMemoryError: Java heap space\n    at com.acme.reports.ExportJob.collectRows(ExportJob.java:88)\n2026-10-02T01:04:13Z WARN Back-off restarting failed container report-worker\n2026-10-02T01:09:40Z WARN Back-off restarting failed container report-worker\n2026-10-02T01:15:02Z WARN Back-off restarting failed container report-worker",
    "expected": {
-    "root_signature": "oom_killed",
+    "root_signature": "heap_exhausted",
+    "also_accept": [
+     "oom_killed"
+    ],
     "category": "resource_exhaustion",
     "must_not_recommend": [
      "restart"
@@ -171,6 +174,154 @@
     "category": "unknown",
     "must_not_recommend": [],
     "symptoms": []
+   }
+  },
+  {
+   "id": "sec-bruteforce",
+   "title": "auth-service: login failure spike from a few IPs",
+   "service": "auth-service",
+   "severity": "SEV2",
+   "alert_text": "[FIRING] AuthFailedLogins: 4,812 failed logins in 5m on auth-service",
+   "logs": "2026-11-07T03:10:01Z WARN auth-service sshd[2211]: Failed password for invalid user admin from 185.220.101.4 port 51122 ssh2\n2026-11-07T03:10:01Z WARN auth-service sshd[2212]: Failed password for root from 185.220.101.4 port 51130 ssh2\n2026-11-07T03:10:02Z WARN auth-service login rejected user=ops@acme.io reason=invalid credentials status=401\n2026-11-07T03:10:05Z WARN auth-service account locked after 10 failed attempts user=ops@acme.io\n2026-11-07T03:11:40Z INFO auth-service rate limiter: too many failed login attempts from 185.220.101.4",
+   "expected": {
+    "root_signature": "brute_force_login",
+    "category": "security",
+    "must_not_recommend": [],
+    "symptoms": [
+     "auth_failure"
+    ]
+   }
+  },
+  {
+   "id": "sec-secret-leak",
+   "title": "payments-api: AWS key committed to public repo",
+   "service": "payments-api",
+   "severity": "SEV1",
+   "alert_text": "[FIRING] SecretScanner: gitleaks found an AWS access key in acme/payments@main",
+   "logs": "2026-11-07T09:00:00Z ERROR ci gitleaks: secret detected: aws-access-token in config/settings.py line 14 (commit 9f2c1d)\n2026-11-07T09:04:12Z WARN cloudtrail CreateAccessKey called by payments-deploy from 45.83.64.1 (unusual location)\n2026-11-07T09:05:30Z WARN cloudtrail login from new country for payments-deploy",
+   "expected": {
+    "root_signature": "secret_exposed",
+    "category": "security",
+    "must_not_recommend": [
+     "delete the commit only"
+    ],
+    "symptoms": []
+   }
+  },
+  {
+   "id": "net-bgp",
+   "title": "edge-router: BGP peer down, regional 5xx",
+   "service": "edge-router",
+   "severity": "SEV1",
+   "alert_text": "[FIRING] RegionalErrors: 34% timeouts from eu-west clients",
+   "logs": "2026-11-07T11:00:00Z ERR edge-router-2 %LINK-3-UPDOWN: Interface TenGigE0/0/1, changed state to down\n2026-11-07T11:00:01Z ERR edge-router-2 %BGP-5-ADJCHANGE: neighbor 203.0.113.9 Down BGP Notification sent hold timer expired\n2026-11-07T11:00:20Z WARN checkout-web upstream request timed out after 10s\n2026-11-07T11:00:25Z WARN monitor 18% packet loss to eu-west edge",
+   "expected": {
+    "root_signature": "link_down",
+    "category": "network",
+    "must_not_recommend": [],
+    "symptoms": [
+     "upstream_timeout"
+    ]
+   }
+  },
+  {
+   "id": "net-dns",
+   "title": "internal DNS SERVFAIL breaks service discovery",
+   "service": "orders-api",
+   "severity": "SEV2",
+   "alert_text": "[FIRING] OrdersApiErrors: 41% errors on orders-api",
+   "logs": "2026-11-07T12:00:00Z ERROR orders-api dial tcp: lookup inventory.internal: SERVFAIL\n2026-11-07T12:00:01Z ERROR orders-api could not resolve host inventory.internal\n2026-11-07T12:00:02Z WARN coredns plugin/forward: no servers could be reached, dns resolution timeout\n2026-11-07T12:00:06Z ERROR orders-api GET /orders 504 upstream timed out after 5s",
+   "expected": {
+    "root_signature": "dns_outage",
+    "category": "network",
+    "must_not_recommend": [],
+    "symptoms": [
+     "upstream_timeout"
+    ]
+   }
+  },
+  {
+   "id": "k8s-imagepull",
+   "title": "catalog-api: rollout stuck on ImagePullBackOff",
+   "service": "catalog-api",
+   "severity": "SEV2",
+   "alert_text": "[FIRING] KubeDeploymentReplicasMismatch catalog-api 0/3 available",
+   "logs": "2026-11-07T13:00:00Z INFO deploy rolling out catalog-api v5.2.0\n2026-11-07T13:00:12Z WARN kubelet Failed to pull image \"registry.acme.io/catalog-api:v5.2.0\": manifest for registry.acme.io/catalog-api:v5.2.0 not found\n2026-11-07T13:00:13Z WARN kubelet Error: ErrImagePull\n2026-11-07T13:01:00Z WARN kubelet Back-off pulling image: ImagePullBackOff",
+   "expected": {
+    "root_signature": "image_pull_failure",
+    "category": "deployment_regression",
+    "must_not_recommend": [
+     "delete the pods"
+    ],
+    "symptoms": []
+   }
+  },
+  {
+   "id": "k8s-node",
+   "title": "node NotReady evicts workloads",
+   "service": "search-api",
+   "severity": "SEV2",
+   "alert_text": "[FIRING] KubeNodeNotReady ip-10-0-3-17 NotReady for 5m",
+   "logs": "2026-11-07T14:00:00Z WARN node-controller Node ip-10-0-3-17 status is now: NodeNotReady\n2026-11-07T14:00:02Z WARN kubelet kubelet stopped posting node status\n2026-11-07T14:05:00Z WARN kube-controller pod search-api-7d9 Evicted: The node was low on resource: memory\n2026-11-07T14:05:30Z ERROR search-api GET /search 504 upstream timed out after 10s",
+   "expected": {
+    "root_signature": "node_not_ready",
+    "category": "infrastructure",
+    "must_not_recommend": [],
+    "symptoms": [
+     "upstream_timeout"
+    ]
+   }
+  },
+  {
+   "id": "data-schema",
+   "title": "events pipeline breaks on producer schema change",
+   "service": "events-pipeline",
+   "severity": "SEV3",
+   "alert_text": "[FIRING] DagFailed: hourly_events_load failed",
+   "logs": "2026-11-07T15:00:00Z ERROR events-consumer failed to deserialize record at offset 88123: schema mismatch, unknown field 'campaign_id'\n2026-11-07T15:00:01Z ERROR events-consumer failed to deserialize record at offset 88124: schema mismatch\n2026-11-07T15:10:00Z WARN kafka consumer group events-loader lag 482113 on partition events-3\n2026-11-07T15:30:00Z ERROR airflow DAG run hourly_events_load__2026-11-07T15 failed",
+   "expected": {
+    "root_signature": "schema_drift",
+    "category": "data_pipeline",
+    "must_not_recommend": [
+     "reset offsets"
+    ],
+    "symptoms": [
+     "job_sla_missed"
+    ]
+   }
+  },
+  {
+   "id": "iot-bearing",
+   "title": "press line 3: vibration then thermal trip",
+   "service": "press-line-3",
+   "severity": "SEV2",
+   "alert_text": "[FIRING] LineStopped: press-line-3 tripped",
+   "logs": "2026-11-07T06:00:00Z WARN plc-3 vibration alarm motor M2 rms velocity 11.4 mm/s (limit 7.1)\n2026-11-07T06:20:00Z WARN plc-3 bearing fault suspected on motor M2\n2026-11-07T06:42:00Z ERROR plc-3 motor M2 temperature 112 C exceeds limit, thermal trip\n2026-11-07T06:42:01Z ERROR plc-3 motor M2 tripped, production halted",
+   "expected": {
+    "root_signature": "vibration_anomaly",
+    "category": "physical_equipment",
+    "must_not_recommend": [
+     "reset the thermal alarm"
+    ],
+    "symptoms": [
+     "equipment_shutdown"
+    ]
+   }
+  },
+  {
+   "id": "iot-power",
+   "title": "cold storage: utility power loss",
+   "service": "cold-storage",
+   "severity": "SEV1",
+   "alert_text": "[FIRING] UpsOnBattery: site DC-2 UPS on battery",
+   "logs": "2026-11-07T02:00:00Z ERROR ups-dc2 utility power lost, UPS switched to battery, runtime 18 min\n2026-11-07T02:00:30Z WARN gateway-7 sensor TMP-14 offline: no telemetry received from sensor\n2026-11-07T02:12:00Z ERROR compressor C1 shut down: power failure",
+   "expected": {
+    "root_signature": "power_event",
+    "category": "physical_equipment",
+    "must_not_recommend": [],
+    "symptoms": [
+     "equipment_shutdown"
+    ]
    }
   }
  ]

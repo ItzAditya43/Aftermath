@@ -5,6 +5,7 @@ as specific as the LLM version: real signatures, real past incident IDs, real wa
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .investigation import InvestigationReport, Phase
@@ -83,6 +84,25 @@ def deterministic_narrative(report: InvestigationReport) -> str:
     return "".join(parts)
 
 
+_HEDGE = re.compile(
+    r"^\s*(?:(?:likely|possibly|probably|perhaps|unknown)\s*[:,-]\s*)?"
+    r"(?:(?:the\s+)?(?:most\s+)?(?:likely|probable|possible|primary)?\s*(?:root\s+)?cause"
+    r"(?:\s+of\s+[^,]{1,80}?)?\s+(?:is|was|appears to be|seems to be)\s*(?:that\s+)?(?=\S)"
+    r"|(?:it\s+is\s+)?(?:most\s+)?(?:likely|probably|possibly)\s+(?:that\s+)?(?=[a-z]))?", re.I)
+
+
+_TRAILING_HEDGE = re.compile(r"\s+(?:is|was|appears to be)\s+the\s+(?:most\s+)?(?:likely|probable)\s+(?:root\s+)?cause\b", re.I)
+
+
+def clean_headline(text: str) -> str:
+    """Strip hedges the AI adds itself ("The most likely root cause is ...") so the label is not doubled."""
+    stripped = _HEDGE.sub("", text.strip(), count=1).strip()
+    stripped = _TRAILING_HEDGE.sub("", stripped).strip()
+    if not stripped:
+        return text.strip()
+    return stripped[0].upper() + stripped[1:]
+
+
 def suggestion_fields(report: InvestigationReport) -> dict[str, Any]:
     """Map to the backend's `Suggestion` contract (likely_root_cause, steps, warnings, confidence, based_on)."""
     leader = report.hypotheses[0] if report.hypotheses else None
@@ -90,7 +110,7 @@ def suggestion_fields(report: InvestigationReport) -> dict[str, Any]:
         root = "Unknown: " + (report.headline if report.signatures else "no known failure signature in the alert or logs.")
     else:
         prefix = "Likely" if leader.status == HypothesisState.LIKELY else "Possibly"
-        root = f"{prefix}: {report.headline}" if report.headline else f"{prefix}: {leader.title}"
+        root = f"{prefix}: {clean_headline(report.headline)}" if report.headline else f"{prefix}: {leader.title}"
     steps = []
     for step in report.remediation.steps:
         marker = " (temporary relief)" if step.temporary else ""

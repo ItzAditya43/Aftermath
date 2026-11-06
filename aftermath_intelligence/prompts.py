@@ -17,6 +17,7 @@ from typing import Annotated
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
 from .redaction import redact_sensitive_text
+from .signatures import Category
 
 def _as_list(value: Any) -> Any:
     """Models sometimes return a bare string (or null) where a list is required."""
@@ -48,6 +49,8 @@ def fence(payload: dict[str, Any], *, max_chars: int = 14_000) -> str:
 
 # --------------------------------------------------------------------------- assessment
 
+_CATEGORIES = "|".join(c.value for c in Category)
+
 ASSESS_SYSTEM = f"""You are the reasoning stage of an incident investigation engine used by on-call engineers.
 Deterministic analysis has already parsed the logs, matched known failure signatures, built a failure chain
 and proposed ranked hypotheses with evidence IDs. Your job: critically assess those hypotheses.
@@ -58,12 +61,14 @@ Do:
 - Point out evidence that contradicts a hypothesis, and evidence that is missing to tell the leaders apart.
 - Use past incidents only as hints: similar symptoms do not prove the same cause.
 - You may propose at most one NEW hypothesis, only if it is supported by supplied evidence IDs.
+- Use the exact failure terms the evidence shows; never upgrade them (a Java heap OutOfMemoryError is not an
+  OOM kill, a timeout is not a crash, a single error is not an outage).
 
 Output one JSON object exactly matching:
 {{"assessments":[{{"hypothesis_id":"H-xxxx","verdict":"leading|plausible|unlikely","reasoning":"...",
    "supporting_evidence_ids":["E..."],"contradicting_evidence_ids":["E..."],"missing_evidence":["..."]}}],
- "new_hypothesis":null | {{"title":"...","category":"application_bug|database|connection_exhaustion|network|resource_exhaustion|deployment_regression|configuration|dependency_failure|infrastructure|authentication_authorization|external_service|capacity|unknown","description":"...","supporting_evidence_ids":["E..."]}},
- "root_cause_summary":"one sentence, hedged appropriately",
+ "new_hypothesis":null | {{"title":"...","category":"{_CATEGORIES}","description":"...","supporting_evidence_ids":["E..."]}},
+ "root_cause_summary":"one sentence stating the cause directly (e.g. 'A connection leak in X exhausted the pool'); do not start with 'likely', 'the most likely', 'possibly' or 'the root cause is' - the product adds the confidence label",
  "contributing_factors":["..."], "symptoms":["..."],
  "distinguishing_evidence":["what to check next to separate the top explanations"],
  "uncertainty":"what you are unsure about"}}
@@ -150,6 +155,7 @@ Write 120-220 words of plain prose, no headings, no bullet lists, no markdown ta
 3. What NOT to do, if past attempts failed or were only temporary.
 4. End with exactly: "Here is the plan I'd follow:"
 Never claim the root cause is confirmed unless status is "verified". Do not invent facts, IDs or commands.
+Use the exact failure terms the evidence shows; never upgrade them (a heap OutOfMemoryError is not an OOM kill).
 {_GUARD}"""
 
 

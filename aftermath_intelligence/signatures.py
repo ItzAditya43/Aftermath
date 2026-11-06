@@ -32,6 +32,9 @@ class Category(StrEnum):
     AUTH = "authentication_authorization"
     EXTERNAL_SERVICE = "external_service"
     CAPACITY = "capacity"
+    SECURITY = "security"
+    DATA_PIPELINE = "data_pipeline"
+    EQUIPMENT = "physical_equipment"
     UNKNOWN = "unknown"
 
 
@@ -71,7 +74,7 @@ class Signature:
         return None
 
 
-CATALOG: tuple[Signature, ...] = (
+CORE_CATALOG: tuple[Signature, ...] = (
     Signature(
         "connection_leak", "database connection leak", Category.APPLICATION_BUG, Role.ORIGIN,
         (r"connection leak", r"proxyleaktask", r"apparent connection leak", r"unclosed connection",
@@ -157,8 +160,8 @@ CATALOG: tuple[Signature, ...] = (
     ),
     Signature(
         "oom_killed", "out-of-memory kill", Category.RESOURCE_EXHAUSTION, Role.MECHANISM,
-        (r"oomkilled", r"out of memory", r"exit code:? ?137", r"outofmemoryerror", r"\bmemoryerror\b",
-         r"java heap space", r"memory limit (?:exceeded|reached)", r"killed process \d+", r"gc overhead limit exceeded"),
+        (r"oomkilled", r"oom[- ]?kill", r"out of memory: kill", r"exit code:? ?137", r"memory limit (?:exceeded|reached)",
+         r"killed process \d+", r"memory cgroup out of memory"),
         checks=("Compare container memory usage with its limit over the incident window",
                 "Identify what workload was running at the time of the kill (batch, large request, cache growth)"),
         mitigations=("Raise the memory limit temporarily while the cause is found",),
@@ -167,6 +170,20 @@ CATALOG: tuple[Signature, ...] = (
         avoid=("Restarting or adding replicas when one job's memory use is the cause: each replica OOMs the same way",),
         causes=("crash_loop", "liveness_probe_failed", "bad_gateway"),
         tool_hints=("container", "metrics", "docker", "resource"),
+    ),
+    Signature(
+        "heap_exhausted", "application out of memory (heap exhausted)", Category.RESOURCE_EXHAUSTION, Role.MECHANISM,
+        (r"outofmemoryerror", r"java heap space", r"gc overhead limit exceeded", r"\bmemoryerror\b",
+         r"javascript heap out of memory", r"fatal error: runtime: out of memory", r"cannot allocate memory",
+         r"(?<!: )\bout of memory\b(?!: kill)"),
+        checks=("Read heap / GC metrics for the process over the incident window",
+                "Capture a heap dump or allocation profile from the failing instance, if safe"),
+        mitigations=("Raise the heap / memory limit temporarily while the cause is found",),
+        fixes=("Stream or chunk large workloads instead of loading them into memory",
+               "Fix unbounded caches / collections"),
+        avoid=("Restarting only resets the heap; the same workload fills it again",),
+        causes=("oom_killed", "crash_loop", "upstream_timeout"),
+        tool_hints=("metrics", "logs", "resource"),
     ),
     Signature(
         "cpu_saturation", "CPU saturation / throttling", Category.RESOURCE_EXHAUSTION, Role.MECHANISM,
@@ -314,7 +331,7 @@ CATALOG: tuple[Signature, ...] = (
         checks=("Check which scheduled jobs started near the first error and their resource use",),
         mitigations=("Pause or reschedule the job",),
         fixes=("Chunk the job and bound its concurrency/connections",),
-        causes=("oom_killed", "connection_pool_exhausted", "db_too_many_connections", "cpu_saturation"),
+        causes=("oom_killed", "heap_exhausted", "connection_pool_exhausted", "db_too_many_connections", "cpu_saturation"),
         tool_hints=("container", "logs", "metrics"),
     ),
     Signature(
@@ -367,7 +384,14 @@ CATALOG: tuple[Signature, ...] = (
     ),
 )
 
+# Domain packs (security, network, kubernetes, data pipelines, industrial equipment) extend the core
+# catalog. They import `Signature` from this module, so they are loaded only after it is defined.
+from .packs import enabled_signatures  # noqa: E402
+
+CATALOG: tuple[Signature, ...] = CORE_CATALOG + enabled_signatures()
 BY_ID: dict[str, Signature] = {s.id: s for s in CATALOG}
+if len(BY_ID) != len(CATALOG):
+    raise RuntimeError("duplicate signature id between the core catalog and a pack")
 
 
 @dataclass(frozen=True)

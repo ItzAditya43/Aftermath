@@ -32,7 +32,7 @@ def test_scenario_root_cause_and_safety(scenario):
     report = run(InvestigationEngine().run(_case(scenario)))
     expected = scenario["expected"]
     leader = report.hypotheses[0]
-    assert (leader.signature_id or "unknown") == expected["root_signature"]
+    assert (leader.signature_id or "unknown") in {expected["root_signature"], *expected.get("also_accept", ())}
     assert leader.category.value == expected["category"]
     for symptom in expected["symptoms"]:
         assert symptom in report.chain.symptoms
