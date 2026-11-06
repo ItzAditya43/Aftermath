@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: aftermath-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: AGENT_MODE
+        value: mock
+      # The free plan's disk is ephemeral: re-seed the demo data whenever the instance starts empty.
+      - key: AUTO_SEED
+        value: "true"
+      - key: DATABASE_URL
+        value: sqlite:///./aftermath.db
+      - key: MOCK_TOKEN_DELAY_MS
+        value: "30"
+      - key: HINDSIGHT_BANK_ID
+        value: aftermath-incidents
+      # Set these in the Render dashboard (not committed).
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: HINDSIGHT_API_KEY
+        sync: false
