@@ -202,3 +202,35 @@ def test_full_investigation_is_exposed_as_json(tmp_path, monkeypatch):
     assert data["hypotheses"][0]["score_breakdown"] and data["graph"]["nodes"] and data["replay"]
     assert data["calibration"]["calibrated"] is False
     assert "Hunter2Secret" not in json.dumps(data)
+
+
+# ---------------------------------------------------------------- C6: secrets never reach an AI provider
+
+SECRETS = ("Hunter2Secret!", "AKIAIOSFODNN7EXAMPLE", "ghp_abcdefghijklmnopqrstuvwxyz0123456789", "s3cr3tpw",
+           "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "wJalrXUtnFEMI", "xoxb-1234567890-abc", "sk_live_abcdefghijklmnop1234")
+SECRET_LOGS = (
+    "2026-11-07T10:00:00Z ERROR payments-api HikariPool-1 - Connection is not available, request timed out after 30000ms "
+    "password=Hunter2Secret! aws_key=AKIAIOSFODNN7EXAMPLE token=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n"
+    "2026-11-07T10:00:01Z ERROR payments-api cannot connect postgres://app:s3cr3tpw@db:5432/pay "
+    "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijkl\n"
+    '2026-11-07T10:00:02Z WARN payments-api config aws_secret_access_key="wJalrXUtnFEMI/K7MDENG" '
+    "slack=xoxb-1234567890-abc stripe=sk_live_abcdefghijklmnop1234\n")
+
+
+def test_redaction_covers_common_credential_formats():
+    from aftermath_intelligence.redaction import redact_sensitive_data, redact_sensitive_text
+    out = redact_sensitive_text(SECRET_LOGS)
+    assert not [s for s in SECRETS if s in out]
+    benign = "pool stats (total=40, active=40, idle=0, waiting=212); tokens=1200 max_tokens: 700; GET /api/token/refresh 200"
+    assert redact_sensitive_text(benign) == benign
+    assert redact_sensitive_data({"input_tokens": 5, "db_password": "x", "api_key_id": "y"}) == {"input_tokens": 5}
+
+
+def test_no_secret_is_ever_sent_to_an_ai_provider():
+    recorder = Recorder(groq=lambda request: groq_reply('{"assessments": [], "root_cause_summary": "leak"}'))
+    engine = InvestigationEngine(router=router(recorder, order="groq"))
+    run(engine.run(IncidentCase(incident_id="INC-S", title="pool exhausted", service="payments-api", severity="SEV1",
+                                alert_text="5xx password=Hunter2Secret!", logs=SECRET_LOGS)))
+    assert recorder.requests, "the engine should have called the AI"
+    sent = " ".join(request.content.decode() for _, request in recorder.requests)
+    assert not [s for s in SECRETS if s in sent]
