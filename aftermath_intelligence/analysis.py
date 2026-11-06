@@ -146,7 +146,7 @@ def analyze_events(events: tuple[NormalizedEvent, ...] | list[NormalizedEvent], 
     sequence_counts: dict[tuple[str, tuple[str, ...]], list[tuple[str, str]]] = defaultdict(list)
     for service, service_events in failures_by_service.items():
         ordered = sorted(service_events, key=lambda event: (event.timestamp is None, event.timestamp, event.event_id))
-        for first, second in zip(ordered, ordered[1:]):
+        for first, second in zip(ordered, ordered[1:], strict=False):
             if (first.timestamp and second.timestamp
                     and (second.timestamp - first.timestamp).total_seconds() > max(1, sequence_window_seconds)):
                 continue

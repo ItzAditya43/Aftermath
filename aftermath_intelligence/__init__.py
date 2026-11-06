@@ -1,4 +1,8 @@
-"""Backend-independent intelligence components for Aftermath."""
+"""Backend-independent intelligence components for Aftermath.
+
+Primary entry point: `InvestigationEngine` (async, bounded, auditable). The older synchronous
+`InvestigationAgent` / `IncidentIntelligenceEngine` remain for offline use and compatibility.
+"""
 
 from .agent import InvestigationAgent, InvestigationResult, InvestigationStatus
 from .analysis import AnalysisReport, analyze_events
@@ -7,7 +11,15 @@ from .evidence import Evidence, EvidenceLedger
 from .evaluation import (BeforeAfterEvaluation, EvaluationCase, EvaluationMetrics,
                          compare_before_after, evaluate_cases)
 from .engine import EvidenceSource, IncidentIntelligenceEngine
+from .changes import ChangeRecord, ChangeSuspect, correlate_changes
 from .history import HistoricalContextAdapter
+from .investigation import (IncidentCase, InvestigationEngine, InvestigationLimits, InvestigationReport, Phase,
+                            ProgressUpdate)
+from .learning import ResolutionEvaluation, evaluate_resolution_report
+from .memory import IncidentMemory, InProcessMemory, MemoryQuery, MemoryRecord, RecalledIncident
+from .store import FileMemory, PersistentCalibration
+from .presentation import deterministic_narrative, suggestion_fields
+from .tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 from .ingestion import IngestionResult, ingest_text
 from .models import NormalizedEvent, Severity
 from .postmortem import IncidentPostmortem, build_postmortem
@@ -18,6 +30,28 @@ from .similarity import (HistoricalIncident, SimilarIncident, cluster_historical
 from .resolution import ResolutionInput, ResolutionRecord, ResolutionStatus, evaluate_resolution
 
 __all__ = [
+    "ChangeRecord",
+    "ChangeSuspect",
+    "IncidentCase",
+    "IncidentMemory",
+    "InProcessMemory",
+    "InvestigationEngine",
+    "InvestigationLimits",
+    "InvestigationReport",
+    "MemoryQuery",
+    "MemoryRecord",
+    "Phase",
+    "ProgressUpdate",
+    "RecalledIncident",
+    "ResolutionEvaluation",
+    "RiskLevel",
+    "ToolRegistry",
+    "ToolResult",
+    "ToolSpec",
+    "correlate_changes",
+    "deterministic_narrative",
+    "evaluate_resolution_report",
+    "suggestion_fields",
     "AnalysisReport",
     "BeforeAfterEvaluation",
     "CorrelationReport",
@@ -53,4 +87,6 @@ __all__ = [
     "evaluate_resolution",
     "ingest_text",
     "recommend_remediation",
+    "FileMemory",
+    "PersistentCalibration",
 ]

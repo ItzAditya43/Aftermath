@@ -98,3 +98,4 @@ git push -u origin feature/<feature-name>
 - **Sync Frequently:** Run `git pull origin main` regularly into your local branch to stay up to date and resolve conflicts early.
 - **Atomic Commits:** Keep commits focused on specific tasks or components.
 - **Communication:** Ping the team if your changes introduce major schema/dependency updates.
+

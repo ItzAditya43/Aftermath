@@ -81,3 +81,50 @@ def validate_tool_arguments(spec: ToolSpec, arguments: dict[str, Any]) -> dict[s
         if not valid[expected](value):
             raise ValueError(f"invalid type for tool argument {name}")
     return arguments
+
+
+class ToolRegistry:
+    """Simple `ToolAdapter` for connector owners: register a function per declared capability.
+
+    The registry re-validates arguments and refuses non-read-only tools unless the call carries an
+    approval token issued by a human-facing flow (`approve`). The investigation engine never
+    requests approval itself, so model output can never trigger a state-changing call.
+    """
+
+    def __init__(self) -> None:
+        self._tools: dict[str, tuple[ToolSpec, Any]] = {}
+        self._approved: set[tuple[str, str]] = set()
+
+    def register(self, spec: ToolSpec, handler: Any) -> None:
+        if spec.name in self._tools:
+            raise ValueError(f"tool {spec.name} already registered")
+        if spec.read_only and spec.risk != RiskLevel.READ_ONLY:
+            raise ValueError("a read_only tool must declare risk=read_only")
+        self._tools[spec.name] = (spec, handler)
+
+    def list_tools(self) -> tuple[ToolSpec, ...]:
+        return tuple(spec for spec, _ in self._tools.values())
+
+    def approve(self, tool_name: str, arguments: dict[str, Any]) -> None:
+        """Record a human approval for one exact call (tool + arguments)."""
+        self._approved.add((tool_name, repr(sorted(arguments.items()))))
+
+    async def execute(self, tool_name: str, arguments: dict[str, Any]) -> ToolResult:
+        if tool_name not in self._tools:
+            return ToolResult(tool_name=tool_name, success=False, summary="unknown tool", error="unknown_tool")
+        spec, handler = self._tools[tool_name]
+        arguments = validate_tool_arguments(spec, dict(arguments))
+        needs_approval = spec.requires_approval or not spec.read_only or spec.risk != RiskLevel.READ_ONLY
+        key = (tool_name, repr(sorted(arguments.items())))
+        if needs_approval and key not in self._approved:
+            return ToolResult(tool_name=tool_name, success=False, summary="approval required", error="approval_required")
+        self._approved.discard(key)  # approvals are single-use
+        result = handler(**arguments)
+        if hasattr(result, "__await__"):
+            result = await result
+        if isinstance(result, ToolResult):
+            return result
+        if isinstance(result, dict):
+            return ToolResult(tool_name=tool_name, success=True, summary=str(result.get("summary", ""))[:400],
+                              data={k: v for k, v in result.items() if k != "summary"})
+        return ToolResult(tool_name=tool_name, success=True, summary=str(result)[:400])

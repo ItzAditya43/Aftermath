@@ -1,41 +1,203 @@
-"""Real agent (Groq + Hindsight). Owned by the AI agent workstream; replace this stub.
+"""Real agent: the Aftermath intelligence engine behind the backend's AgentService contract.
 
-Selected when AGENT_MODE=real. The backend calls exactly the three methods below. See
-app/agent/interface.py for the event types and rules; app/agent/mock_agent.py is a working
-reference that emits the same events.
+Selected when AGENT_MODE=real. Flow for `analyze`:
 
-Suggested mapping:
-  ingest_history(incidents)          -> Hindsight retain, one memory per resolved incident
-                                        (title, service, root_cause, resolution, failed_attempts)
-  analyze(incident)                  -> Hindsight recall on alert_text + logs -> yield MemoryEvent per hit,
-                                        then Groq streaming completion -> yield TokenEvent per chunk,
-                                        then a JSON/tool-call completion -> yield SuggestionEvent.
-                                        aftermath_intelligence.ingest_text/analyze_events can pre-digest logs.
-  learn_from_resolution(incident, r) -> Hindsight retain (+ optionally reflect)
+  1. Deterministic investigation (parse logs, signatures, anomalies, failure chain, memory recall,
+     ranked hypotheses, remediation plan). Always succeeds, no network needed.
+  2. Optional LLM assessment / diagnostic planning inside the engine (Groq -> Gemini -> Ollama fallback).
+  3. Stream MemoryEvents, then a narrative (LLM-streamed, or deterministic if no provider answers),
+     then exactly one SuggestionEvent.
 
-Settings available on `settings`: groq_api_key, hindsight_api_key, hindsight_bank_id.
+Memory: `FileMemory` (JSON lines at AFTERMATH_MEMORY_PATH, default .aftermath/memory.jsonl) so lessons
+survive restarts; set AFTERMATH_MEMORY_PATH="" for process-only memory. Both implement
+`aftermath_intelligence.memory.IncidentMemory`, so the Hindsight adapter can be passed as `memory=`
+without touching this file. Reports never claim Hindsight was used (`memory_backend` says what was).
+
+Calibration: graded predictions persist at AFTERMATH_CALIBRATION_PATH. After 30 graded outcomes the
+suggestion confidence becomes an isotonic-calibrated probability instead of a raw ranking score.
+
+Diagnostics: read-only Docker / GitHub connectors from env (see aftermath_intelligence.connectors).
+Recent commits and workflow runs are fetched before each investigation for change correlation.
+
+Configuration (env / .env): AI_PROVIDER, AI_FALLBACK_PROVIDER (comma list), GROQ_API_KEY, GROQ_MODEL,
+GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, AFTERMATH_LLM_TIMEOUT_SECONDS,
+AFTERMATH_MAX_LLM_CALLS, AFTERMATH_INVESTIGATION_SECONDS.
 """
 
+import logging
+import os
+import re
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 
-from app.agent.interface import AgentEvent, IncidentContext, ResolutionContext
+from aftermath_intelligence.calibration import CalibrationTracker, GradedPrediction
+from aftermath_intelligence.connectors import Connectors, connectors_from_env
+from aftermath_intelligence.ingestion import ingest_text
+from aftermath_intelligence.investigation import IncidentCase, InvestigationEngine, InvestigationLimits, InvestigationReport
+from aftermath_intelligence.learning import ResolutionEvaluation, evaluate_resolution_report
+from aftermath_intelligence.llm import LLMError, LLMRequest, LLMRouter, LLMSettings
+from aftermath_intelligence.memory import IncidentMemory, InProcessMemory, build_memory_record
+from aftermath_intelligence.presentation import deterministic_narrative, narrative_context, suggestion_fields
+from aftermath_intelligence.prompts import NARRATIVE_SYSTEM, narrative_prompt
+from aftermath_intelligence.resolution import ResolutionStatus
+from aftermath_intelligence.store import FileMemory, PersistentCalibration
+from aftermath_intelligence.tools import ToolAdapter
+from app.agent.interface import AgentEvent, IncidentContext, MemoryEvent, ResolutionContext, SuggestionEvent, TokenEvent
 from app.config import Settings
+
+logger = logging.getLogger("aftermath.agent")
+
+_MAX_REPORTS = 200
 
 
 class RealAgent:
     name = "real"
 
-    def __init__(self, settings: Settings):
-        raise NotImplementedError(
-            "RealAgent is not implemented yet. Set AGENT_MODE=mock, or implement app/agent/real_agent.py."
+    def __init__(self, settings: Settings, *, router: LLMRouter | None = None, memory: IncidentMemory | None = None,
+                 tools: ToolAdapter | None = None, limits: InvestigationLimits | None = None,
+                 stream_narrative: bool = True):
+        if router is None:
+            llm_settings = LLMSettings.from_env(overrides={"GROQ_API_KEY": settings.groq_api_key})
+            router = LLMRouter(llm_settings)
+        self.router = router
+        memory_path = os.getenv("AFTERMATH_MEMORY_PATH", ".aftermath/memory.jsonl")
+        self.memory: IncidentMemory = memory or (FileMemory(memory_path) if memory_path else InProcessMemory())
+        self.connectors = connectors_from_env() if tools is None else Connectors(registry=None)
+        tools = tools if tools is not None else self.connectors.registry
+        self.limits = limits or InvestigationLimits(
+            max_llm_calls=int(os.getenv("AFTERMATH_MAX_LLM_CALLS", "3")),
+            max_seconds=float(os.getenv("AFTERMATH_INVESTIGATION_SECONDS", "45")),
         )
+        self.engine = InvestigationEngine(router=router, memory=self.memory, tools=tools, limits=self.limits)
+        self.stream_narrative = stream_narrative
+        calibration_path = os.getenv("AFTERMATH_CALIBRATION_PATH", ".aftermath/calibration.jsonl")
+        self.calibration: CalibrationTracker = (PersistentCalibration(calibration_path) if calibration_path
+                                                else CalibrationTracker())
+        # Latest structured report per incident, for richer API endpoints and for grading at resolve time.
+        self.reports: OrderedDict[str, InvestigationReport] = OrderedDict()
+        self.evaluations: OrderedDict[str, ResolutionEvaluation] = OrderedDict()
+        logger.info("RealAgent ready: providers=%s memory=%s", router.describe(), self.memory.backend)
+
+    # ------------------------------------------------------------------ AgentService
 
     async def analyze(self, incident: IncidentContext) -> AsyncIterator[AgentEvent]:
-        raise NotImplementedError
-        yield  # pragma: no cover  (makes this an async generator)
+        changes = ()
+        if self.connectors.github is not None:
+            changes = await self.connectors.github.recent_changes(incident.service, until=incident.created_at)
+        report = await self.engine.run(_case(incident, changes))
+        self._remember(self.reports, incident.id, report)
+
+        for item in report.recalled_incidents:
+            record = item.record
+            failed = [a.description for a in record.attempts if a.outcome in {ResolutionStatus.FAILED, ResolutionStatus.TEMPORARY}]
+            yield MemoryEvent(
+                past_incident_id=record.incident_id, title=record.title, service=record.service,
+                summary=_memory_summary(record.root_cause, record.resolution, item.matching_points),
+                relevance_score=item.relevance, root_cause=record.root_cause, resolution=record.resolution,
+                failed_attempts=failed, time_to_resolve_minutes=record.time_to_resolve_minutes,
+            )
+
+        async for chunk in self._narrate(report):
+            yield TokenEvent(text=chunk)
+
+        fields = suggestion_fields(report)
+        calibrated = self.calibration.calibrate(report.top_score)
+        if calibrated is not None:
+            fields["confidence"] = calibrated
+        yield SuggestionEvent(**fields)
 
     async def learn_from_resolution(self, incident: IncidentContext, resolution: ResolutionContext) -> None:
-        raise NotImplementedError
+        events = ingest_text(incident.logs, incident_id=incident.id, source="logs", default_service=incident.service).events
+        report = self.reports.get(incident.id)
+        evaluation = evaluate_resolution_report(
+            incident_id=incident.id, title=incident.title, service=incident.service, alert_text=incident.alert_text,
+            events=events, root_cause=resolution.root_cause, fix_that_worked=resolution.fix_that_worked,
+            what_failed=resolution.what_failed, notes=resolution.notes,
+            hypotheses=report.hypotheses if report else (),
+            recommended_steps=[s.description for s in report.remediation.steps] if report else (),
+            severity=incident.severity, created_at=incident.created_at, resolved_at=incident.resolved_at,
+        )
+        await self.memory.retain(evaluation.memory_record)
+        self._remember(self.evaluations, incident.id, evaluation)
+        if report is not None:
+            self.calibration.record(GradedPrediction(incident.id, report.top_score, evaluation.prediction.verdict,
+                                                     evaluation.prediction.rank_of_actual))
+        logger.info("learned from %s: outcome=%s prediction=%s", incident.id, evaluation.outcome.value,
+                    evaluation.prediction.verdict)
 
     async def ingest_history(self, incidents: list[IncidentContext]) -> None:
-        raise NotImplementedError
+        for incident in incidents:
+            if incident.status != "resolved" or not incident.root_cause:
+                continue
+            events = ingest_text(incident.logs, incident_id=incident.id, source="logs",
+                                 default_service=incident.service).events
+            await self.memory.retain(build_memory_record(
+                incident_id=incident.id, title=incident.title, service=incident.service,
+                alert_text=incident.alert_text, events=events, root_cause=incident.root_cause,
+                resolution=incident.resolution, failed_attempts=incident.failed_attempts, severity=incident.severity,
+                created_at=incident.created_at, time_to_resolve_minutes=incident.time_to_resolve_minutes,
+                notes=incident.notes,
+            ))
+
+    async def reset(self) -> None:
+        clear = getattr(self.memory, "clear", None)
+        if clear is not None:
+            await clear()
+        self.reports.clear()
+        self.evaluations.clear()
+        self.calibration.clear()
+
+    async def aclose(self) -> None:
+        await self.connectors.aclose()
+        await self.router.aclose()
+
+    # ------------------------------------------------------------------ helpers
+
+    async def _narrate(self, report: InvestigationReport) -> AsyncIterator[str]:
+        if self.stream_narrative and self.router.available:
+            emitted = False
+            try:
+                request = LLMRequest.of(NARRATIVE_SYSTEM, narrative_prompt(narrative_context(report)),
+                                        task="narrative", max_output_tokens=700, temperature=0.3)
+                async for chunk in self.router.stream(request):
+                    emitted = True
+                    yield chunk
+                if emitted:
+                    return
+                # Reasoning models can spend the whole token budget thinking and stream nothing.
+                logger.warning("narrative stream returned no content; using deterministic narrative")
+            except LLMError as exc:
+                logger.warning("narrative stream failed (%s); using deterministic narrative", exc.kind.value)
+                if emitted:
+                    yield "\n\n(The AI explanation was interrupted. Here is the plan I'd follow:)"
+                    return
+        for token in _tokens(deterministic_narrative(report)):
+            yield token
+
+    @staticmethod
+    def _remember(store: OrderedDict, key: str, value) -> None:
+        store[key] = value
+        store.move_to_end(key)
+        while len(store) > _MAX_REPORTS:
+            store.popitem(last=False)
+
+
+def _case(incident: IncidentContext, changes=()) -> IncidentCase:
+    return IncidentCase(incident_id=incident.id, title=incident.title, service=incident.service,
+                        severity=incident.severity, alert_text=incident.alert_text, logs=incident.logs,
+                        created_at=incident.created_at, changes=tuple(changes))
+
+
+def _memory_summary(root_cause: str | None, resolution: str | None, matching: tuple[str, ...]) -> str:
+    parts = []
+    if root_cause:
+        parts.append(f"Root cause: {root_cause.strip().rstrip('.')}.")
+    if resolution:
+        parts.append(f"Fix: {resolution.strip().rstrip('.')}.")
+    if matching:
+        parts.append(f"Matched on {'; '.join(matching)}.")
+    return " ".join(parts) or "Similar past incident."
+
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"\S+\s*", text)

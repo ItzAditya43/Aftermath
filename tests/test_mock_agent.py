@@ -34,13 +34,9 @@ def test_factory_returns_mock_that_satisfies_protocol():
     assert isinstance(agent, AgentService)
 
 
-def test_factory_real_mode_explains_stub():
-    try:
-        create_agent(Settings(_env_file=None, agent_mode="real"))
-    except NotImplementedError as exc:
-        assert "AGENT_MODE=mock" in str(exc)
-    else:  # pragma: no cover - once the real agent exists this test should be updated
-        raise AssertionError("expected the RealAgent stub to raise")
+def test_factory_real_mode_builds_real_agent():
+    agent = create_agent(Settings(_env_file=None, agent_mode="real"))
+    assert agent.name == "real"
 
 
 def test_signatures():
