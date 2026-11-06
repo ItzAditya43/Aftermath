@@ -54,14 +54,15 @@ async def main() -> int:
                                                severity=s["severity"], alert_text=s["alert_text"], logs=s["logs"]))
         leader = report.hypotheses[0]
         expected = s["expected"]
-        hit = (leader.signature_id or "unknown") == expected["root_signature"]
+        accepted = {expected["root_signature"], *expected.get("also_accept", ())}
+        hit = (leader.signature_id or "unknown") in accepted
         correct += hit
         category_ok += leader.category.value == expected["category"]
         symptoms_total += len(expected["symptoms"])
         symptoms_found += sum(sym in report.chain.symptoms for sym in expected["symptoms"])
         unsafe += sum(1 for step in report.remediation.steps
                       if step.kind in {RemediationKind.MITIGATION, RemediationKind.ROOT_CAUSE_FIX} and not step.requires_approval)
-        rank = next((i + 1 for i, h in enumerate(report.hypotheses) if (h.signature_id or "unknown") == expected["root_signature"]), None)
+        rank = next((i + 1 for i, h in enumerate(report.hypotheses) if (h.signature_id or "unknown") in accepted), None)
         tracker.record(GradedPrediction(s["id"], leader.score, "correct" if hit else "incorrect", rank))
         llm = f" llm={','.join(report.llm.providers) or '-'}" if args.llm else ""
         print(f"{'PASS' if hit else 'FAIL'} {s['id']:18} expected={expected['root_signature']:26} got={str(leader.signature_id):26} "

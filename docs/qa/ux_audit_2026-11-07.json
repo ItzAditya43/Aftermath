@@ -1,0 +1,179 @@
+{
+ "desktop-1440": {
+  "text_nodes": 82,
+  "min_font_px": 8,
+  "pct_chars_under_12px": 41,
+  "pct_chars_under_10px": 18,
+  "pct_chars_uppercase": 17,
+  "pct_chars_monospace": 24,
+  "chars_by_font_px": {
+   "8": 69,
+   "9": 335,
+   "10": 484,
+   "12": 782,
+   "14": 243,
+   "16": 272
+  },
+  "smallest_examples": [
+   "9px \"SEV2\"",
+   "9px \"INC-1022\"",
+   "9px \"STATUS \u00b7\"",
+   "9px \"MEMORY FIELD READY\"",
+   "9px \"INCIDENTS\"",
+   "9px \"23\"",
+   "9px \"OPEN\"",
+   "9px \"AVG TTR\""
+  ],
+  "tap_targets_under_44px": [
+   "New incident 118x40",
+   "Select incident 226x42",
+   "Search incidents by ID, title, 226x42",
+   "Re-analyze 226x40",
+   "Record resolution 226x40",
+   "Pause constellation animation 74x40",
+   "Replay the current investigati 80x40"
+  ],
+  "horizontal_overflow": false,
+  "visible_buttons": 15,
+  "axe_violations": [
+   {
+    "id": "scrollable-region-focusable",
+    "impact": "serious",
+    "nodes": 1,
+    "sample": [
+     "  Element should be focusable"
+    ]
+   }
+  ]
+ },
+ "laptop-1280": {
+  "text_nodes": 77,
+  "min_font_px": 8,
+  "pct_chars_under_12px": 43,
+  "pct_chars_under_10px": 20,
+  "pct_chars_uppercase": 18,
+  "pct_chars_monospace": 25,
+  "chars_by_font_px": {
+   "8": 69,
+   "9": 335,
+   "10": 484,
+   "12": 782,
+   "14": 243,
+   "16": 135
+  },
+  "smallest_examples": [
+   "9px \"SEV2\"",
+   "9px \"INC-1022\"",
+   "9px \"STATUS \u00b7\"",
+   "9px \"MEMORY FIELD READY\"",
+   "9px \"INCIDENTS\"",
+   "9px \"23\"",
+   "9px \"OPEN\"",
+   "9px \"AVG TTR\""
+  ],
+  "tap_targets_under_44px": [
+   "New incident 118x40",
+   "Select incident 226x42",
+   "Search incidents by ID, title, 226x42",
+   "Re-analyze 226x40",
+   "Record resolution 226x40",
+   "Pause constellation animation 74x40",
+   "Replay the current investigati 80x40"
+  ],
+  "horizontal_overflow": false,
+  "visible_buttons": 13,
+  "axe_violations": [
+   {
+    "id": "scrollable-region-focusable",
+    "impact": "serious",
+    "nodes": 1,
+    "sample": [
+     "  Element should be focusable"
+    ]
+   }
+  ]
+ },
+ "tablet-768": {
+  "text_nodes": 62,
+  "min_font_px": 8,
+  "pct_chars_under_12px": 96,
+  "pct_chars_under_10px": 6,
+  "pct_chars_uppercase": 16,
+  "pct_chars_monospace": 24,
+  "chars_by_font_px": {
+   "8": 20,
+   "9": 70,
+   "10": 19,
+   "11": 1338,
+   "14": 61
+  },
+  "smallest_examples": [
+   "9px \"SEV2\"",
+   "9px \"INC-1022\"",
+   "9px \"STATUS \u00b7\"",
+   "9px \"MEMORY FIELD READY\"",
+   "8px \"Incident singularity\"",
+   "9px \"SUGGESTION \u00b7 RANK SCORE\"",
+   "9px \"rank 0.82\""
+  ],
+  "tap_targets_under_44px": [
+   "New incident 118x40",
+   "Select incident 226x42",
+   "Search incidents by ID, title, 226x42",
+   "Re-analyze 226x40",
+   "Record resolution 226x40",
+   "BUTTON 226x40",
+   "BUTTON 226x40",
+   "BUTTON 226x40",
+   "BUTTON 226x40",
+   "BUTTON 226x40",
+   "BUTTON 226x40",
+   "Pause constellation animation 77x40"
+  ],
+  "horizontal_overflow": false,
+  "visible_buttons": 21,
+  "axe_violations": [],
+  "mobile_has_details_button": true,
+  "mobile_selects": [
+   "INC-1022 \u00b7 api-gateway: 502 Bad Gateway after deploy of v2.58.0"
+  ]
+ },
+ "mobile-390": {
+  "text_nodes": 8,
+  "min_font_px": 9,
+  "pct_chars_under_12px": 96,
+  "pct_chars_under_10px": 13,
+  "pct_chars_uppercase": 16,
+  "pct_chars_monospace": 22,
+  "chars_by_font_px": {
+   "9": 32,
+   "11": 203,
+   "14": 9
+  },
+  "smallest_examples": [
+   "9px \"SUGGESTION \u00b7 RANK SCORE\"",
+   "9px \"rank 0.82\""
+  ],
+  "tap_targets_under_44px": [
+   "BUTTON 35x44",
+   "Pause constellation animation 35x44",
+   "Replay the current investigati 35x44"
+  ],
+  "horizontal_overflow": false,
+  "visible_buttons": 6,
+  "axe_violations": [
+   {
+    "id": "button-name",
+    "impact": "critical",
+    "nodes": 1,
+    "sample": [
+     "  Element's default semantics were not overridden with role=\"none\" or role=\"presentation\""
+    ]
+   }
+  ],
+  "mobile_has_details_button": true,
+  "mobile_selects": [
+   "INC-1022 \u00b7 api-gateway: 502 Bad Gateway after deploy of v2.58.0"
+  ]
+ }
+}

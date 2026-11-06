@@ -255,6 +255,14 @@ class Lesson(BaseModel):
     action_type: ActionType | None = None
 
 
+_ACTION_LABELS = {
+    ActionType.RESTART: "Restarting", ActionType.SCALE_OUT: "Scaling out", ActionType.RAISE_LIMIT: "Raising limits",
+    ActionType.ROLLBACK: "Rolling back", ActionType.REDEPLOY: "Redeploying", ActionType.CONFIG_CHANGE: "Changing config",
+    ActionType.CODE_FIX: "A code fix", ActionType.FAILOVER: "Failing over", ActionType.CACHE_PURGE: "Purging the cache",
+    ActionType.KILL_SESSION: "Killing sessions", ActionType.PAUSE_JOB: "Pausing the job", ActionType.WAIT: "Waiting",
+}
+
+
 def derive_lessons(recalled: Iterable[RecalledIncident]) -> tuple[Lesson, ...]:
     recalled = tuple(recalled)
     lessons: list[Lesson] = []
@@ -266,10 +274,15 @@ def derive_lessons(recalled: Iterable[RecalledIncident]) -> tuple[Lesson, ...]:
     for action, entries in failed_by_action.items():
         ids = tuple(dict.fromkeys(i for i, _ in entries))
         outcomes = {a.outcome for _, a in entries}
-        kind = "only temporary relief" if outcomes == {ResolutionStatus.TEMPORARY} else "did not resolve it"
+        kind = "only gave temporary relief" if outcomes == {ResolutionStatus.TEMPORARY} else "did not resolve it"
         example = entries[0][1].description.rstrip(".")
-        lessons.append(Lesson(kind="avoid_action", action_type=action, incident_ids=ids,
-                              message=f"{action.value.replace('_', ' ')} {kind} in {', '.join(ids)} (e.g. \"{example[:140]}\")"))
+        if action == ActionType.OTHER:
+            # No action family to name: quote what was actually done instead of "other ...".
+            message = f"\"{example[:140]}\" {kind} in {', '.join(ids)}"
+        else:
+            label = _ACTION_LABELS.get(action, action.value.replace("_", " "))
+            message = f"{label} {kind} in {', '.join(ids)} (e.g. \"{example[:140]}\")"
+        lessons.append(Lesson(kind="avoid_action", action_type=action, incident_ids=ids, message=message))
     for item in recalled:
         record = item.record
         if record.resolution and record.resolution_status in {ResolutionStatus.VERIFIED, ResolutionStatus.PARTIAL}:

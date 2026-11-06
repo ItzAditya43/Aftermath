@@ -24,6 +24,7 @@ GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_BASE_URL, OLLAMA_MODEL, AFTERMATH_LLM_TIMEO
 AFTERMATH_MAX_LLM_CALLS, AFTERMATH_INVESTIGATION_SECONDS.
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -66,8 +67,10 @@ class RealAgent:
         tools = tools if tools is not None else self.connectors.registry
         self.limits = limits or InvestigationLimits(
             max_llm_calls=int(os.getenv("AFTERMATH_MAX_LLM_CALLS", "3")),
-            max_seconds=float(os.getenv("AFTERMATH_INVESTIGATION_SECONDS", "45")),
+            max_seconds=float(os.getenv("AFTERMATH_INVESTIGATION_SECONDS", "20")),
         )
+        self.narrative_first_token_seconds = float(os.getenv("AFTERMATH_NARRATIVE_FIRST_TOKEN_SECONDS", "8"))
+        self.narrative_total_seconds = float(os.getenv("AFTERMATH_NARRATIVE_SECONDS", "25"))
         self.engine = InvestigationEngine(router=router, memory=self.memory, tools=tools, limits=self.limits)
         self.stream_narrative = stream_narrative
         calibration_path = os.getenv("AFTERMATH_CALIBRATION_PATH", ".aftermath/calibration.jsonl")
@@ -104,6 +107,9 @@ class RealAgent:
         calibrated = self.calibration.calibrate(report.top_score)
         if calibrated is not None:
             fields["confidence"] = calibrated
+        if "confidence_calibrated" in SuggestionEvent.model_fields:
+            # Lets the UI show a percentage only when the score is a real probability.
+            fields["confidence_calibrated"] = calibrated is not None
         yield SuggestionEvent(**fields)
 
     async def learn_from_resolution(self, incident: IncidentContext, resolution: ResolutionContext) -> None:
@@ -147,6 +153,23 @@ class RealAgent:
         self.evaluations.clear()
         self.calibration.clear()
 
+    def investigation(self, incident_id: str) -> dict | None:
+        """The latest full investigation for an incident as JSON-safe data, or None if not analysed yet.
+
+        Contains the failure chain and causal graph, every ranked hypothesis with its score breakdown,
+        evidence, anomalies, recalled incidents and lessons, the remediation plan and a step-by-step replay.
+        Evidence is already redacted. Intended for a `GET /incidents/{id}/investigation` endpoint.
+        """
+        report = self.reports.get(incident_id)
+        if report is None:
+            return None
+        data = report.model_dump(mode="json")
+        evaluation = self.evaluations.get(incident_id)
+        if evaluation is not None:
+            data["resolution_evaluation"] = evaluation.model_dump(mode="json")
+        data["calibration"] = self.calibration.report().model_dump(mode="json")
+        return data
+
     async def aclose(self) -> None:
         await self.connectors.aclose()
         await self.router.aclose()
@@ -154,23 +177,45 @@ class RealAgent:
     # ------------------------------------------------------------------ helpers
 
     async def _narrate(self, report: InvestigationReport) -> AsyncIterator[str]:
+        """Stream the AI explanation, bounded in time; fall back to the deterministic narrative.
+
+        A judge or on-call engineer should never stare at a spinner: if no first token arrives within
+        `narrative_first_token_seconds` (rate-limited or slow provider), the deterministic narrative is used.
+        """
         if self.stream_narrative and self.router.available:
             emitted = False
+            loop = asyncio.get_running_loop()
+            ends_at = loop.time() + self.narrative_total_seconds
+            request = LLMRequest.of(NARRATIVE_SYSTEM, narrative_prompt(narrative_context(report)),
+                                    task="narrative", max_output_tokens=700, temperature=0.3)
+            stream = self.router.stream(request).__aiter__()
             try:
-                request = LLMRequest.of(NARRATIVE_SYSTEM, narrative_prompt(narrative_context(report)),
-                                        task="narrative", max_output_tokens=700, temperature=0.3)
-                async for chunk in self.router.stream(request):
+                while True:
+                    wait = self.narrative_first_token_seconds if not emitted else ends_at - loop.time()
+                    if wait <= 0:
+                        raise asyncio.TimeoutError
+                    try:
+                        chunk = await asyncio.wait_for(stream.__anext__(), timeout=wait)
+                    except StopAsyncIteration:
+                        break
                     emitted = True
                     yield chunk
                 if emitted:
                     return
                 # Reasoning models can spend the whole token budget thinking and stream nothing.
                 logger.warning("narrative stream returned no content; using deterministic narrative")
+            except asyncio.TimeoutError:
+                logger.warning("narrative stream too slow (emitted=%s); using deterministic narrative", emitted)
+                if emitted:
+                    yield "\n\n(The AI explanation was cut short to keep the analysis fast. Here is the plan I'd follow:)"
+                    return
             except LLMError as exc:
                 logger.warning("narrative stream failed (%s); using deterministic narrative", exc.kind.value)
                 if emitted:
                     yield "\n\n(The AI explanation was interrupted. Here is the plan I'd follow:)"
                     return
+            finally:
+                await _close(stream)
         for token in _tokens(deterministic_narrative(report)):
             yield token
 
@@ -197,6 +242,15 @@ def _memory_summary(root_cause: str | None, resolution: str | None, matching: tu
     if matching:
         parts.append(f"Matched on {'; '.join(matching)}.")
     return " ".join(parts) or "Similar past incident."
+
+
+async def _close(stream) -> None:
+    aclose = getattr(stream, "aclose", None)
+    if aclose is not None:
+        try:
+            await aclose()
+        except Exception:  # noqa: BLE001 - closing an abandoned provider stream must never fail the analysis
+            logger.debug("closing narrative stream failed", exc_info=True)
 
 
 def _tokens(text: str) -> list[str]:

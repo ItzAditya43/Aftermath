@@ -150,6 +150,7 @@ def plan_remediation(hypotheses, *, lessons=(), service: str | None = None, seve
     proven = [lesson for lesson in lessons if lesson.kind == "proven_fix"]
     steps: list[RemediationStep] = []
     warnings: list[str] = []
+    generic: list[str] = []          # catalog advice; ranked after this incident's own history
     blocked: list[str] = []
 
     def add(kind: RemediationKind, text: str, *, h=None, temporary=False, source="playbook", reason="",
@@ -197,7 +198,7 @@ def plan_remediation(hypotheses, *, lessons=(), service: str | None = None, seve
             for fix in signature.fixes[:2]:
                 add(RemediationKind.ROOT_CAUSE_FIX, fix, h=h, expected="Removes the failure mechanism")
             for note in signature.avoid:
-                warnings.append(f"Avoid: {note}")
+                generic.append(f"Avoid: {note}")
     for lesson in proven[:2]:
         text = lesson.message.split(" was resolved by: ", 1)[-1]
         add(RemediationKind.ROOT_CAUSE_FIX, f"Apply the fix that resolved {lesson.incident_ids[0]}: {text}", h=leader,
@@ -205,11 +206,22 @@ def plan_remediation(hypotheses, *, lessons=(), service: str | None = None, seve
             expected="Resolved the matching incident previously; confirm the same mechanism first")
     if leader and leader.category.value != "unknown":
         add(RemediationKind.MONITORING, f"Alert on the leading indicator for '{leader.title}' before it causes user-facing errors", h=leader)
+    # Every action that failed or only helped briefly in a similar incident is a warning, even when this
+    # plan never proposed it: responders reach for restarts and scale-outs on their own.
+    warned = {classify_action(text) for text in blocked}
+    warned |= {action for action, lesson in avoid.items() if any(lesson.message[:60] in w for w in warnings)}
+    for action, lesson in avoid.items():
+        if action not in warned:
+            warnings.append(f"Avoid: {lesson.message}")
+    for lesson in lessons:
+        if lesson.kind == "avoid_action" and lesson.action_type is None:
+            warnings.append(f"Avoid: {lesson.message}")
     for lesson in lessons:
         if lesson.kind == "contradiction":
             warnings.append(lesson.message)
+    warnings.extend(generic)
     if severity == "SEV1":
-        warnings.append("SEV1: post a status update before applying changes")
+        warnings.insert(0, "SEV1: post a status update before applying changes")
     order = [RemediationKind.VERIFY, RemediationKind.INVESTIGATE, RemediationKind.MITIGATION,
              RemediationKind.ROOT_CAUSE_FIX, RemediationKind.PREVENTIVE, RemediationKind.MONITORING]
     steps.sort(key=lambda s: order.index(s.kind))
