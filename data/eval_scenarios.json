@@ -1,0 +1,177 @@
+{
+ "description": "Scenario fixtures for intelligence tests and scripts/evaluate_intelligence.py. Expected values describe the correct analysis.",
+ "scenarios": [
+  {
+   "id": "db-pool",
+   "title": "orders-api: QueuePool limit reached, requests timing out",
+   "service": "orders-api",
+   "severity": "SEV2",
+   "alert_text": "[FIRING] OrdersApi5xx: 22% 5xx on orders-api for 10m",
+   "logs": "{\"ts\":\"2026-10-01T10:00:01Z\",\"level\":\"error\",\"service\":\"orders-api\",\"msg\":\"sqlalchemy.exc.TimeoutError: QueuePool limit of size 20 overflow 10 reached, connection timed out, timeout 30\"}\n{\"ts\":\"2026-10-01T10:00:03Z\",\"level\":\"error\",\"service\":\"orders-api\",\"msg\":\"sqlalchemy.exc.TimeoutError: QueuePool limit of size 20 overflow 10 reached, connection timed out, timeout 30\"}\n{\"ts\":\"2026-10-01T10:00:09Z\",\"level\":\"warning\",\"service\":\"orders-api\",\"msg\":\"pool stats active=30/30 idle=0 waiting=57\"}\n{\"ts\":\"2026-10-01T10:00:15Z\",\"level\":\"error\",\"service\":\"orders-api\",\"msg\":\"GET /orders 504 upstream timed out after 30s\"}",
+   "expected": {
+    "root_signature": "connection_pool_exhausted",
+    "category": "connection_exhaustion",
+    "must_not_recommend": [],
+    "symptoms": [
+     "upstream_timeout"
+    ]
+   }
+  },
+  {
+   "id": "memory",
+   "title": "report-worker OOMKilled during nightly export",
+   "service": "report-worker",
+   "severity": "SEV3",
+   "alert_text": "[FIRING] KubePodCrashLooping report-worker restarted 4 times (OOMKilled)",
+   "logs": "2026-10-02T01:00:00Z INFO report_worker.jobs.nightly_export: starting batch rows=8,400,000\n2026-10-02T01:04:12Z ERROR java.lang.OutOfMemoryError: Java heap space\n    at com.acme.reports.ExportJob.collectRows(ExportJob.java:88)\n2026-10-02T01:04:13Z WARN Back-off restarting failed container report-worker\n2026-10-02T01:09:40Z WARN Back-off restarting failed container report-worker\n2026-10-02T01:15:02Z WARN Back-off restarting failed container report-worker",
+   "expected": {
+    "root_signature": "oom_killed",
+    "category": "resource_exhaustion",
+    "must_not_recommend": [
+     "restart"
+    ],
+    "symptoms": []
+   }
+  },
+  {
+   "id": "cpu",
+   "title": "search-api latency: CPU throttling",
+   "service": "search-api",
+   "severity": "SEV3",
+   "alert_text": "[FIRING] SearchLatencyHigh p99 4.2s on search-api",
+   "logs": "2026-10-03T12:00:00Z WARN container search-api cpu throttling 78% of periods (limit 500m)\n2026-10-03T12:00:05Z WARN search-api cpu usage 99% sustained\n2026-10-03T12:00:09Z ERROR GET /search 504 gateway timeout\n2026-10-03T12:00:12Z ERROR GET /search 504 gateway timeout",
+   "expected": {
+    "root_signature": "cpu_saturation",
+    "category": "resource_exhaustion",
+    "must_not_recommend": [],
+    "symptoms": [
+     "upstream_timeout"
+    ]
+   }
+  },
+  {
+   "id": "network",
+   "title": "cart-svc: connection resets to inventory-svc",
+   "service": "cart-svc",
+   "severity": "SEV2",
+   "alert_text": "[FIRING] CartErrors 14% on cart-svc",
+   "logs": "2026-10-04T08:30:00Z ERROR Error: read ECONNRESET calling inventory-svc:8080/stock\n    at TLSWrap.onStreamRead (node:internal/stream_base_commons:217:20)\n2026-10-04T08:30:02Z ERROR Error: connect ECONNREFUSED 10.2.3.4:8080 (inventory-svc)\n2026-10-04T08:30:05Z ERROR dial tcp 10.2.3.4:8080: i/o timeout",
+   "expected": {
+    "root_signature": "network_failure",
+    "category": "network",
+    "must_not_recommend": [],
+    "symptoms": []
+   }
+  },
+  {
+   "id": "deploy-regression",
+   "title": "profile-api 500s after v4.2.0 deploy",
+   "service": "profile-api",
+   "severity": "SEV2",
+   "alert_text": "[FIRING] ProfileApi5xx 31% on profile-api",
+   "logs": "2026-10-05T15:00:00Z INFO deploy profile-api release v4.2.0 rolled out by ci-bot\n2026-10-05T15:01:10Z ERROR [http-nio-8080-exec-3] c.a.profile.ProfileController - GET /profile failed\njava.lang.NullPointerException: Cannot invoke \"Address.getCity()\" because \"user.address\" is null\n    at com.acme.profile.ProfileMapper.toDto(ProfileMapper.java:44)\n    at com.acme.profile.ProfileController.get(ProfileController.java:31)\n2026-10-05T15:01:12Z ERROR [http-nio-8080-exec-7] c.a.profile.ProfileController - GET /profile failed\njava.lang.NullPointerException: Cannot invoke \"Address.getCity()\" because \"user.address\" is null\n    at com.acme.profile.ProfileMapper.toDto(ProfileMapper.java:44)",
+   "expected": {
+    "root_signature": "null_reference",
+    "category": "application_bug",
+    "must_not_recommend": [],
+    "symptoms": []
+   }
+  },
+  {
+   "id": "db-down",
+   "title": "billing-api cannot reach Postgres",
+   "service": "billing-api",
+   "severity": "SEV1",
+   "alert_text": "[FIRING] BillingApiDown: health check failing",
+   "logs": "2026-10-06T03:12:00Z ERROR psycopg2.OperationalError: could not connect to server: Connection refused. Is the server running on host \"billing-db\" and accepting TCP/IP connections on port 5432?\n2026-10-06T03:12:02Z ERROR psycopg2.OperationalError: could not connect to server: Connection refused. Is the server running on host \"billing-db\" and accepting TCP/IP connections on port 5432?\n2026-10-06T03:12:05Z WARN Readiness probe failed: HTTP probe failed with statuscode: 503",
+   "expected": {
+    "root_signature": "db_unavailable",
+    "category": "database",
+    "must_not_recommend": [],
+    "symptoms": [
+     "liveness_probe_failed"
+    ]
+   }
+  },
+  {
+   "id": "cascade",
+   "title": "checkout-web timeouts caused by payments-api",
+   "service": "checkout-web",
+   "severity": "SEV1",
+   "alert_text": "[FIRING] CheckoutErrors: 504s on checkout-web",
+   "logs": "{\"ts\":\"2026-10-07T18:00:00Z\",\"level\":\"error\",\"service\":\"payments-api\",\"msg\":\"HikariPool-1 - Connection is not available, request timed out after 30000ms.\"}\n{\"ts\":\"2026-10-07T18:00:01Z\",\"level\":\"warn\",\"service\":\"payments-api\",\"msg\":\"HikariPool-1 - Pool stats (total=40, active=40, idle=0, waiting=180)\"}\n{\"ts\":\"2026-10-07T18:00:20Z\",\"level\":\"error\",\"service\":\"checkout-web\",\"msg\":\"POST /api/pay -> 504 upstream timed out (payments-api)\"}\n{\"ts\":\"2026-10-07T18:00:21Z\",\"level\":\"error\",\"service\":\"checkout-web\",\"msg\":\"POST /api/pay -> 504 upstream timed out (payments-api)\"}",
+   "expected": {
+    "root_signature": "connection_pool_exhausted",
+    "category": "connection_exhaustion",
+    "must_not_recommend": [],
+    "symptoms": [
+     "upstream_timeout"
+    ]
+   }
+  },
+  {
+   "id": "auth",
+   "title": "auth-service: tokens rejected after key rotation",
+   "service": "auth-service",
+   "severity": "SEV2",
+   "alert_text": "[FIRING] Auth401Spike: 401 rate 45% on api-gateway",
+   "logs": "2026-10-08T09:00:00Z INFO key rotation job: now signing with kid=2026-10-08\n2026-10-08T09:00:30Z ERROR JWT validation failed: no matching key for kid=2026-10-08 in JWKS\n2026-10-08T09:00:31Z ERROR status=401 unauthorized: signature verification failed\n2026-10-08T09:00:33Z ERROR JWT validation failed: no matching key for kid=2026-10-08 in JWKS",
+   "expected": {
+    "root_signature": "jwt_key_mismatch",
+    "category": "authentication_authorization",
+    "must_not_recommend": [],
+    "symptoms": [
+     "auth_failure"
+    ]
+   }
+  },
+  {
+   "id": "crashloop",
+   "title": "ingest-worker crash loop",
+   "service": "ingest-worker",
+   "severity": "SEV2",
+   "alert_text": "[FIRING] KubePodCrashLooping ingest-worker",
+   "logs": "2026-10-09T22:00:00Z ERROR OSError: [Errno 28] No space left on device: '/data/spool/batch-8812.tmp'\n2026-10-09T22:00:01Z WARN Back-off restarting failed container ingest-worker\n2026-10-09T22:02:00Z ERROR OSError: [Errno 28] No space left on device: '/data/spool/batch-8813.tmp'\n2026-10-09T22:02:01Z WARN Back-off restarting failed container ingest-worker\n2026-10-09T22:05:00Z WARN Back-off restarting failed container ingest-worker",
+   "expected": {
+    "root_signature": "disk_full",
+    "category": "resource_exhaustion",
+    "must_not_recommend": [
+     "restart"
+    ],
+    "symptoms": [
+     "crash_loop"
+    ]
+   }
+  },
+  {
+   "id": "external",
+   "title": "payments-api: Stripe API timing out",
+   "service": "payments-api",
+   "severity": "SEV2",
+   "alert_text": "[FIRING] PaymentProviderErrors on payments-api",
+   "logs": "2026-10-10T11:00:00Z ERROR stripe charge request timed out after 10s (api.stripe.com)\n2026-10-10T11:00:04Z ERROR stripe charge request timed out after 10s (api.stripe.com)\n2026-10-10T11:00:09Z ERROR provider returned 503 service unavailable (stripe)",
+   "expected": {
+    "root_signature": "external_dependency_error",
+    "category": "external_service",
+    "must_not_recommend": [],
+    "symptoms": [
+     "upstream_timeout"
+    ]
+   }
+  },
+  {
+   "id": "ambiguous",
+   "title": "web-frontend: intermittent failures reported",
+   "service": "web-frontend",
+   "severity": "SEV4",
+   "alert_text": "Users report the page sometimes does not load.",
+   "logs": "2026-10-11T10:00:00Z WARN request took longer than expected\n2026-10-11T10:00:30Z INFO health ok\n2026-10-11T10:01:00Z WARN slow render",
+   "expected": {
+    "root_signature": "unknown",
+    "category": "unknown",
+    "must_not_recommend": [],
+    "symptoms": []
+   }
+  }
+ ]
+}

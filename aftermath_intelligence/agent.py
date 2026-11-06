@@ -15,7 +15,7 @@ from .hypotheses import (RootCauseHypothesis, generate_deterministic_hypotheses,
                          generate_llm_hypotheses)
 from .planner import DiagnosticRequest, InvestigationPlan, plan_diagnostics, plan_with_llm
 from .providers import ProviderError, ProviderRouter
-from .tools import ToolAdapter, ToolResult, ToolSpec, validate_tool_arguments
+from .tools import ToolAdapter, ToolResult, validate_tool_arguments
 from .models import NormalizedEvent
 from .redaction import redact_sensitive_data, redact_sensitive_text
 from .similarity import SimilarIncident, find_similar_incidents
@@ -246,7 +246,7 @@ def _compact_evidence(items: tuple[Evidence, ...], limit: int) -> tuple[Evidence
         EvidenceKind.OBSERVATION: 3,
         EvidenceKind.DEPLOYMENT: 1,
     }
-    return tuple(sorted(items, key=lambda item: (priority[item.kind], item.evidence_id))[:max(0, limit)])
+    return tuple(sorted(items, key=lambda item: (priority.get(item.kind, 1), item.evidence_id))[:max(0, limit)])
 
 
 def _sanitize_tool_result(result: ToolResult) -> ToolResult:

@@ -20,6 +20,9 @@ class EvidenceKind(StrEnum):
     TOOL_RESULT = "tool_result"
     DEPLOYMENT = "deployment"
     HISTORICAL = "historical"
+    SIGNATURE = "signature"
+    ANOMALY = "anomaly"
+    ALERT = "alert"
 
 
 class Evidence(BaseModel):
@@ -51,6 +54,62 @@ class EvidenceLedger:
     def by_id(self, evidence_id: str) -> Evidence | None:
         return self._items.get(evidence_id)
 
+    def __contains__(self, evidence_id: object) -> bool:
+        return evidence_id in self._items
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def by_kind(self, *kinds: EvidenceKind) -> tuple[Evidence, ...]:
+        return tuple(item for item in self._items.values() if item.kind in kinds)
+
+    def by_service(self, service: str) -> tuple[Evidence, ...]:
+        return tuple(item for item in self._items.values()
+                     if service in str(item.attributes.get("service") or item.attributes.get("services") or ""))
+
+    def by_event(self, event_id: str) -> tuple[Evidence, ...]:
+        return tuple(item for item in self._items.values() if event_id in item.event_ids)
+
+    def search(self, text: str) -> tuple[Evidence, ...]:
+        needle = text.lower()
+        return tuple(item for item in self._items.values() if needle in item.summary.lower())
+
+    def ranked(self, limit: int | None = None) -> tuple[Evidence, ...]:
+        """Most decision-relevant first: signatures/anomalies/tools, then patterns, then raw observations."""
+        order = {EvidenceKind.SIGNATURE: 0, EvidenceKind.TOOL_RESULT: 0, EvidenceKind.ANOMALY: 1,
+                 EvidenceKind.ALERT: 1, EvidenceKind.DEPLOYMENT: 1, EvidenceKind.HISTORICAL: 2,
+                 EvidenceKind.TEMPORAL_SPIKE: 2, EvidenceKind.ERROR_PATTERN: 3, EvidenceKind.CORRELATION: 4,
+                 EvidenceKind.OBSERVATION: 5}
+        def weight(item: Evidence) -> tuple[int, float, str]:
+            count = item.attributes.get("count")
+            return (order[item.kind], -float(count) if isinstance(count, (int, float)) else 0.0, item.evidence_id)
+        ranked = sorted(self._items.values(), key=weight)
+        return tuple(ranked[:limit] if limit is not None else ranked)
+
+    def add_signature(self, *, signature_id: str, label: str, category: str, role: str, count: int,
+                      event_ids: tuple[str, ...], snippet: str, services: tuple[str, ...],
+                      first_seen: str | None) -> Evidence:
+        return self.add(_evidence(EvidenceKind.SIGNATURE, redact_sensitive_text(f"{label}: \"{snippet[:160]}\""),
+                                  "signature_catalog", event_ids, {
+                                      "signature": signature_id, "category": category, "role": role,
+                                      "count": count, "services": ",".join(services), "first_seen": first_seen}))
+
+    def add_anomaly(self, *, kind: str, summary: str, event_ids: tuple[str, ...],
+                    attributes: dict[str, str | int | float | bool | None]) -> Evidence:
+        return self.add(_evidence(EvidenceKind.ANOMALY, summary, f"anomaly:{kind}", event_ids,
+                                  {"anomaly": kind, **attributes}))
+
+    def add_change(self, *, change_id: str, kind: str, title: str, score: float, reasons: tuple[str, ...],
+                   timestamp: str | None, service: str | None) -> Evidence:
+        return self.add(_evidence(EvidenceKind.DEPLOYMENT, redact_sensitive_text(f"{kind} {change_id}: {title[:160]}"),
+                                  "change_connector", (), {"change_id": change_id, "kind": kind, "score": score,
+                                                           "reasons": "; ".join(reasons)[:400], "timestamp": timestamp,
+                                                           "service": service}))
+
+    def add_alert(self, *, alert_text: str, service: str, severity: str) -> Evidence:
+        return self.add(_evidence(EvidenceKind.ALERT, redact_sensitive_text(alert_text[:400]), "alert", ("alert",),
+                                  {"service": service, "severity": severity}))
+
     def add_event_facts(self, events: list[NormalizedEvent] | tuple[NormalizedEvent, ...]) -> None:
         for event in events:
             if event.severity not in {Severity.WARNING, Severity.ERROR, Severity.CRITICAL} and event.event_type == "log":
@@ -59,6 +118,8 @@ class EvidenceLedger:
             self.add(_evidence(EvidenceKind.OBSERVATION, summary, event.source, (event.event_id,), {
                 "service": event.service, "timestamp": event.timestamp.isoformat() if event.timestamp else None,
                 "severity": event.severity.value, "exception_type": event.exception_type,
+                "origin_frame": event.metadata.get("origin_frame"),
+                "root_exception": event.metadata.get("root_exception"),
             }))
 
     def add_analysis(self, report: AnalysisReport) -> None:
