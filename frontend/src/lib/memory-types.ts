@@ -26,6 +26,7 @@ export type Suggestion = {
   steps: string[];
   warnings: string[];
   confidence: number;
+  confidence_calibrated?: boolean;
   based_on: string[];
 };
 

@@ -3,6 +3,7 @@ import type {
   IncidentDetail,
   InvestigationState,
   MemoryEvent,
+  Suggestion,
 } from "./memory-types";
 
 export const CONSENSUS_CONFIDENCE_THRESHOLD = 0.8;
@@ -45,8 +46,13 @@ export function applyAnalysisEvent(state: InvestigationState, event: AnalysisEve
   }
 }
 
-export function failInvestigation(state: InvestigationState, message: string): InvestigationState {
-  return { ...state, status: "error", phase: "error", error: message };
+/** Keep the last completed result visible if a newer analysis attempt fails. */
+export function failInvestigation(
+  state: InvestigationState,
+  message: string,
+  previous: InvestigationState = state,
+): InvestigationState {
+  return { ...previous, status: "error", phase: "error", consensus: false, error: message };
 }
 
 /** Consensus is derived only from a completed and internally consistent backend result. */
@@ -54,11 +60,39 @@ export function hasConsensusEvidence(state: InvestigationState, incident: Incide
   const { done, suggestion, memories } = state;
   if (state.status !== "complete" || !done || !suggestion) return false;
   if (done.incident_id !== incident.id || done.memories_used !== memories.length) return false;
+  return hasSuggestionConsensus(suggestion, memories);
+}
+
+/** Evaluate persisted suggestions against the memory references returned by the API. */
+export function hasSavedConsensusEvidence(
+  suggestion: Suggestion | null,
+  memories: MemoryEvent[],
+): boolean {
+  return hasSuggestionConsensus(suggestion, memories);
+}
+
+function hasSuggestionConsensus(suggestion: Suggestion | null, memories: MemoryEvent[]): boolean {
+  if (!suggestion || suggestion.confidence_calibrated !== true) return false;
   if (suggestion.confidence < CONSENSUS_CONFIDENCE_THRESHOLD) return false;
 
   const recalledIds = new Set(memories.map((memory) => memory.past_incident_id));
   const supportedMemories = new Set(suggestion.based_on.filter((id) => recalledIds.has(id)));
   return supportedMemories.size >= 2;
+}
+
+export type IncidentListAvailability = "loading" | "offline" | "error" | "empty" | "available";
+
+export function getIncidentListAvailability(
+  loading: boolean,
+  error: string | null,
+  offline: boolean,
+  incidentCount: number,
+): IncidentListAvailability {
+  if (loading) return "loading";
+  if (incidentCount > 0) return "available";
+  if (offline) return "offline";
+  if (error) return "error";
+  return "empty";
 }
 
 export function toMemoryEvent(reference: {

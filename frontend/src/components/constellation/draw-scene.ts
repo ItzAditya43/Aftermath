@@ -1,5 +1,13 @@
 import type { SceneCamera, SceneMemory, SceneNode, ScenePoint } from "@/lib/memory-types";
-import { getCameraScale, getCorePoint, getOrbitalRadii, getSatellitePoint, getScenePositions } from "./scene-layout";
+import {
+  getCameraScale,
+  getCorePoint,
+  getOrbitalRadii,
+  getScenePositions,
+  getConstellationEdges,
+  calculateConstellationTiming,
+  normalizeAngleDiff,
+} from "./scene-layout";
 
 const PALETTE = {
   black: "#03040B",
@@ -11,6 +19,7 @@ const PALETTE = {
 const TAU = Math.PI * 2;
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const easeOut = (value: number) => 1 - (1 - clamp(value, 0, 1)) ** 3;
+const RECALL_TRAVEL_MS = 1050;
 
 export type DrawSceneFrame = {
   elapsed: number;
@@ -25,6 +34,8 @@ export type DrawSceneFrame = {
   consensusAt: number | null;
   recallStartTimes: Map<string, number>;
   wakeRanks: Map<string, number>;
+  reducedMotion?: boolean;
+  angleTracking?: Map<string, { currentAngle: number; targetAngle: number; changeTime: number }>;
 };
 
 export type ServiceEdge = { from: string; to: string; phase: number };
@@ -102,7 +113,17 @@ export function drawScene(
   }
   const memoryById = new Map(memories.map((memory) => [memory.id, memory]));
   const nodeById = new Map(layout.map((node) => [node.memoryId, node]));
-  const recallRecords = memories.filter((memory) => memory.recalled).sort((a, b) => (b.relevance ?? 0) - (a.relevance ?? 0));
+  const recallRecords = memories
+    .filter((memory) => memory.recalled)
+    .sort((a, b) => {
+      const timeA = frame.recallStartTimes.get(a.id) ?? -1000;
+      const timeB = frame.recallStartTimes.get(b.id) ?? -1000;
+      if (timeA !== timeB) return timeA - timeB;
+      const relA = a.relevance ?? 0;
+      const relB = b.relevance ?? 0;
+      if (Math.abs(relB - relA) > 0.001) return relB - relA;
+      return a.id.localeCompare(b.id);
+    });
   const scenePoints = new Map(basePositions);
   const arrival = new Map<string, { start: ScenePoint; target: ScenePoint; progress: number; landedAt: number; control: ScenePoint }>();
 
@@ -111,14 +132,48 @@ export function drawScene(
     const node = nodeById.get(memory.id);
     if (!origin || !node) return;
     const startAt = frame.recallStartTimes.get(memory.id) ?? -1000;
-    const progress = easeOut((elapsed - startAt) / 900);
-    const satellite = getSatellitePoint(index, recallRecords.length, memory.relevance ?? 0.5, width, height, camera);
+    const progress = frame.reducedMotion ? 1 : easeOut((elapsed - startAt) / RECALL_TRAVEL_MS);
+
+    const total = recallRecords.length;
+    let baseAngle: number;
+    if (total <= 1) {
+      baseAngle = -Math.PI / 2;
+    } else if (total === 2) {
+      baseAngle = index === 0 ? -Math.PI / 2 - Math.PI / 3 : -Math.PI / 2 + Math.PI / 3;
+    } else {
+      baseAngle = (index / total) * TAU - Math.PI / 2;
+    }
+
+    let smoothBaseAngle = baseAngle;
+    if (frame.angleTracking && !frame.reducedMotion) {
+      const tracking = frame.angleTracking.get(memory.id);
+      if (!tracking) {
+        frame.angleTracking.set(memory.id, { currentAngle: baseAngle, targetAngle: baseAngle, changeTime: elapsed });
+      } else {
+        const prevT = clamp((elapsed - tracking.changeTime) / 420, 0, 1);
+        const currentInterp = tracking.currentAngle + normalizeAngleDiff(tracking.targetAngle, tracking.currentAngle) * easeOut(prevT);
+        if (Math.abs(normalizeAngleDiff(baseAngle, tracking.targetAngle)) > 0.001) {
+          tracking.currentAngle = currentInterp;
+          tracking.targetAngle = baseAngle;
+          tracking.changeTime = elapsed;
+        }
+        const t = clamp((elapsed - tracking.changeTime) / 420, 0, 1);
+        smoothBaseAngle = tracking.currentAngle + normalizeAngleDiff(tracking.targetAngle, tracking.currentAngle) * easeOut(t);
+      }
+    }
+
+    const formationRadius = (165 + Math.min(total, 8) * 4) * cameraScale;
+    const finalAngle = smoothBaseAngle + camera.yaw * 0.15;
+    const satellite = {
+      x: center.x + Math.cos(finalAngle) * formationRadius,
+      y: center.y + Math.sin(finalAngle) * formationRadius * 0.74,
+    };
     const formation = nodeFormation.get(memory.id) ?? 1;
     const target = { x: center.x + (satellite.x - center.x) * formation, y: center.y + (satellite.y - center.y) * formation };
     const control = curveControl(origin, target, node.angle, cameraScale);
     const point = quadraticPoint(origin, control, target, progress);
     scenePoints.set(memory.id, point);
-    arrival.set(memory.id, { start: origin, target, progress, landedAt: startAt + 900, control });
+    arrival.set(memory.id, { start: origin, target, progress, landedAt: startAt + RECALL_TRAVEL_MS, control });
   });
 
   context.clearRect(0, 0, width, height);
@@ -287,48 +342,80 @@ export function drawScene(
     const endpoint = migrating ? point : motion.target;
     const control = migrating ? curveControl(start, endpoint, node.angle, cameraScale) : curveControl(center, endpoint, node.angle, cameraScale);
 
-    context.beginPath();
-    context.moveTo(center.x, center.y);
-    context.quadraticCurveTo(control.x, control.y, migrating ? point.x : motion.target.x, migrating ? point.y : motion.target.y);
-    const filament = context.createLinearGradient(center.x, center.y, endpoint.x, endpoint.y);
-    filament.addColorStop(0, "rgba(124, 58, 237, 0.94)");
-    filament.addColorStop(0.55, "rgba(168, 85, 247, 0.92)");
-    filament.addColorStop(1, "rgba(250, 204, 21, 0.98)");
-    context.strokeStyle = filament;
-    context.lineWidth = migrating ? 1.35 : 0.8;
-    context.shadowColor = migrating ? PALETTE.violet : PALETTE.gold;
-    context.shadowBlur = migrating ? 13 : 4;
-    context.stroke();
-    context.shadowBlur = 0;
+    // Initial detachment pulse from origin orbit when recall begins
+    const recallAge = elapsed - startAt;
+    if (migrating && recallAge >= 0 && recallAge < 550) {
+      const depProg = clamp(recallAge / 550, 0, 1);
+      const depRadius = 4 + depProg * 22;
+      const depAlpha = (1 - depProg) * 0.75;
+      context.beginPath();
+      context.arc(motion.start.x, motion.start.y, depRadius, 0, TAU);
+      context.strokeStyle = `rgba(250, 204, 21, ${depAlpha})`;
+      context.lineWidth = 1.3 * (1 - depProg);
+      context.stroke();
+    }
 
-    // A compact vapor trail decays behind the moving satellite.
     if (migrating) {
-      const particleCount = 36;
+      // Radiant migration flight path connecting origin orbit to traveling star
+      context.beginPath();
+      context.moveTo(motion.start.x, motion.start.y);
+      const flightControl = curveControl(motion.start, point, node.angle, cameraScale);
+      context.quadraticCurveTo(flightControl.x, flightControl.y, point.x, point.y);
+      const flightGradient = context.createLinearGradient(motion.start.x, motion.start.y, point.x, point.y);
+      flightGradient.addColorStop(0, "rgba(168, 85, 247, 0.25)");
+      flightGradient.addColorStop(0.55, "rgba(168, 85, 247, 0.7)");
+      flightGradient.addColorStop(1, "rgba(250, 204, 21, 0.95)");
+      context.strokeStyle = flightGradient;
+      context.lineWidth = 1.6;
+      context.shadowColor = PALETTE.gold;
+      context.shadowBlur = 10;
+      context.stroke();
+      context.shadowBlur = 0;
+    } else {
+      // Settled quadratic link between intelligence core and settled star
+      context.beginPath();
+      context.moveTo(center.x, center.y);
+      context.quadraticCurveTo(control.x, control.y, motion.target.x, motion.target.y);
+      const filament = context.createLinearGradient(center.x, center.y, endpoint.x, endpoint.y);
+      filament.addColorStop(0, "rgba(124, 58, 237, 0.94)");
+      filament.addColorStop(0.55, "rgba(168, 85, 247, 0.92)");
+      filament.addColorStop(1, "rgba(250, 204, 21, 0.98)");
+      context.strokeStyle = filament;
+      context.lineWidth = 0.8;
+      context.shadowColor = PALETTE.gold;
+      context.shadowBlur = 4;
+      context.stroke();
+      context.shadowBlur = 0;
+    }
+
+    // A luminous comet trail and traveling star nucleus along the migration path
+    if (migrating) {
+      const particleCount = 32;
       for (let particle = 0; particle < particleCount; particle += 1) {
-        const trailT = motion.progress - particle * 0.0065;
+        const trailT = motion.progress - particle * 0.0075;
         if (trailT <= 0) continue;
-        const vapor = quadraticPoint(motion.start, curveControl(motion.start, motion.target, node.angle, cameraScale), motion.target, trailT);
-        const alpha = (1 - particle / particleCount) * 0.3;
+        const vapor = quadraticPoint(motion.start, motion.control, motion.target, trailT);
+        const pFrac = particle / particleCount;
+        const alpha = (1 - pFrac) * 0.42;
         context.beginPath();
-        context.arc(vapor.x, vapor.y, 0.6 + (1 - particle / particleCount) * 0.8, 0, TAU);
-        context.fillStyle = `rgba(168, 85, 247, ${alpha})`;
+        context.arc(vapor.x, vapor.y, 0.8 + (1 - pFrac) * 1.5, 0, TAU);
+        context.fillStyle = pFrac < 0.28 ? `rgba(254, 240, 138, ${alpha})` : `rgba(168, 85, 247, ${alpha})`;
         context.fill();
       }
-      const spark = quadraticPoint(motion.start, curveControl(motion.start, motion.target, node.angle, cameraScale), motion.target, motion.progress);
       context.beginPath();
-      context.arc(spark.x, spark.y, 3.4, 0, TAU);
+      context.arc(point.x, point.y, 4.6, 0, TAU);
       context.fillStyle = PALETTE.white;
       context.shadowColor = PALETTE.gold;
-      context.shadowBlur = 20;
+      context.shadowBlur = 22;
       context.fill();
       context.shadowBlur = 0;
     }
 
     if (flare > 0) {
       context.beginPath();
-      context.arc(point.x, point.y, 8 + (1 - flare) * 24, 0, TAU);
-      context.strokeStyle = `rgba(250, 204, 21, ${flare * 0.8})`;
-      context.lineWidth = 1 + flare;
+      context.arc(point.x, point.y, 6 + (1 - flare) * 26, 0, TAU);
+      context.strokeStyle = `rgba(250, 204, 21, ${flare * 0.85})`;
+      context.lineWidth = 1.2 + flare * 1.2;
       context.shadowColor = PALETTE.gold;
       context.shadowBlur = 18 * flare;
       context.stroke();
@@ -403,6 +490,19 @@ export function drawScene(
   }
 
   // 6. Singularity core: progress lens, chromatic bloom and anamorphic flare.
+  const matchCount = recallRecords.length;
+  const travelMs = frame.reducedMotion ? 0 : RECALL_TRAVEL_MS;
+  const landedTimes = recallRecords.map((m) => (frame.recallStartTimes.get(m.id) ?? -1000) + travelMs);
+  const constellationEdges = getConstellationEdges(matchCount);
+  const constellationTiming = calculateConstellationTiming(constellationEdges, landedTimes, {
+    reducedMotion: frame.reducedMotion,
+  });
+  const formationCompleteAt = constellationTiming.formationCompleteAt;
+  const lockAge = elapsed - formationCompleteAt;
+  const coreLockBoost = (!frame.reducedMotion && matchCount >= 2 && lockAge >= 0 && lockAge < 900)
+    ? clamp(1 - lockAge / 900, 0, 1)
+    : 0;
+
   const compression = frame.consensus && consensusAge >= 0 && consensusAge < 120 ? 1 - (consensusAge / 120) * 0.2 : frame.consensus && consensusAge < 280 ? 0.8 + ((consensusAge - 120) / 160) * 0.2 : 1;
   const kineticZoom = frame.consensus && consensusAge >= 0 ? 1 + 0.065 * Math.exp(-consensusAge / 900) : 1;
   const shake = frame.consensus && consensusAge >= 0 ? Math.sin(consensusAge * 0.12) * 8 * Math.exp(-consensusAge / 380) : 0;
@@ -426,9 +526,9 @@ export function drawScene(
   context.shadowBlur = 0;
 
   const bloom = context.createRadialGradient(coreX, coreY, 0, coreX, coreY, coreRadius);
-  bloom.addColorStop(0, `rgba(250, 204, 21, ${0.16 + coreBuild * 0.6})`);
-  bloom.addColorStop(0.18, `rgba(254, 240, 138, ${coreBuild * 0.46})`);
-  bloom.addColorStop(0.52, `rgba(168, 85, 247, ${coreBuild * 0.25})`);
+  bloom.addColorStop(0, `rgba(250, 204, 21, ${0.16 + coreBuild * 0.6 + coreLockBoost * 0.24})`);
+  bloom.addColorStop(0.18, `rgba(254, 240, 138, ${coreBuild * 0.46 + coreLockBoost * 0.22})`);
+  bloom.addColorStop(0.52, `rgba(168, 85, 247, ${coreBuild * 0.25 + coreLockBoost * 0.12})`);
   bloom.addColorStop(1, "rgba(13, 16, 34, 0)");
   context.fillStyle = bloom;
   context.beginPath();
@@ -463,9 +563,9 @@ export function drawScene(
   }
   context.beginPath();
   context.arc(coreX, coreY, 9 * cameraScale + 1, 0, TAU);
-  context.fillStyle = PALETTE.gold;
+  context.fillStyle = coreLockBoost > 0.4 ? PALETTE.white : PALETTE.gold;
   context.shadowColor = PALETTE.gold;
-  context.shadowBlur = frame.consensus ? 36 : 28;
+  context.shadowBlur = (frame.consensus ? 36 : 28) + coreLockBoost * 18;
   context.fill();
   context.shadowBlur = 0;
 
@@ -499,34 +599,319 @@ export function drawScene(
   }
 
   // 8. Bank nodes catch the wave, flare gold, drift, then settle into a quiet hum.
-  // 9. A phase-locked recall web appears only after the verified consensus event.
-  if (frame.consensus && consensusAge >= 0 && recallRecords.length > 2) {
-    const points = recallRecords.map((memory) => scenePoints.get(memory.id)).filter((point): point is ScenePoint => Boolean(point));
-    if (points.length > 2) {
-      context.beginPath();
-      context.moveTo(points[0]!.x, points[0]!.y);
-      for (let index = 1; index < points.length; index += 1) context.lineTo(points[index]!.x, points[index]!.y);
-      context.closePath();
-      context.fillStyle = `rgba(250, 204, 21, ${0.035 + Math.sin(elapsed * 0.0018) * 0.012})`;
-      context.fill();
-      context.strokeStyle = "rgba(250, 204, 21, 0.82)";
-      context.lineWidth = 1.1;
-      context.shadowColor = PALETTE.gold;
-      context.shadowBlur = 16;
-      context.stroke();
-      context.shadowBlur = 0;
-      const tieCount = Math.min(12, Math.floor(points.length / 2));
-      for (let tie = 0; tie < tieCount; tie += 1) {
-        const fromIndex = Math.floor(tie * points.length / tieCount);
-        const from = points[fromIndex];
-        const to = points[(fromIndex + Math.floor(points.length / 2)) % points.length];
+  // 9. Incident Constellation Formation & Radiant Aura Release
+  const points = recallRecords.map((memory) => scenePoints.get(memory.id)).filter((point): point is ScenePoint => Boolean(point));
+
+  if (matchCount >= 1) {
+    const singleLandedAt = landedTimes[0] ?? 0;
+    const allLanded = frame.reducedMotion || elapsed >= singleLandedAt;
+
+    if (matchCount === 1) {
+      // 1 match: Graceful single-star radiant halo pulse when landed
+      if (allLanded && points[0]) {
+        const star = points[0];
+        const age = elapsed - singleLandedAt;
+        if (age >= 0 && age < 1600 && !frame.reducedMotion) {
+          const auraProgress = clamp(age / 1600, 0, 1);
+          const auraRadius = 14 + easeOut(auraProgress) * 44;
+          const auraAlpha = (1 - auraProgress) * 0.75;
+          context.beginPath();
+          context.arc(star.x, star.y, auraRadius, 0, TAU);
+          context.strokeStyle = `rgba(250, 204, 21, ${auraAlpha * 0.9})`;
+          context.lineWidth = 1.8 * (1 - auraProgress);
+          context.shadowColor = PALETTE.gold;
+          context.shadowBlur = 18 * (1 - auraProgress);
+          context.stroke();
+          context.shadowBlur = 0;
+
+          context.beginPath();
+          context.arc(star.x, star.y, auraRadius * 0.78, 0, TAU);
+          context.strokeStyle = `rgba(168, 85, 247, ${auraAlpha * 0.7})`;
+          context.lineWidth = 1.4;
+          context.stroke();
+        }
+      }
+    } else {
+      // 2 or more matches: Form geometric constellation and release aura
+      const formationComplete = frame.reducedMotion || elapsed >= formationCompleteAt;
+      const lockFlash = (!frame.reducedMotion && lockAge >= 0 && lockAge < 320)
+        ? clamp(1 - lockAge / 320, 0, 1)
+        : 0;
+
+      // Draw interior celestial veil if 3 or more matches and formation is complete
+      if (formationComplete && matchCount >= 3) {
+        const cx = points.reduce((sum, p) => sum + p.x, 0) / matchCount;
+        const cy = points.reduce((sum, p) => sum + p.y, 0) / matchCount;
+        const maxDist = Math.max(...points.map((p) => Math.hypot(p.x - cx, p.y - cy)));
+        const breath = 0.5 + 0.5 * Math.sin(elapsed * 0.002);
+        const veilBoost = lockAge >= 0 && lockAge < 900 ? (1 - lockAge / 900) * 0.08 : 0;
+
+        context.beginPath();
+        context.moveTo(points[0]!.x, points[0]!.y);
+        for (let i = 1; i < matchCount; i += 1) context.lineTo(points[i]!.x, points[i]!.y);
+        context.closePath();
+
+        const veil = context.createRadialGradient(cx, cy, 0, cx, cy, maxDist * 1.15);
+        veil.addColorStop(0, `rgba(250, 204, 21, ${0.08 + breath * 0.035 + veilBoost})`);
+        veil.addColorStop(0.48, `rgba(168, 85, 247, ${0.055 + breath * 0.025 + veilBoost * 0.7})`);
+        veil.addColorStop(1, "rgba(124, 58, 237, 0.01)");
+        context.fillStyle = veil;
+        context.fill();
+      }
+
+      // Draw internal geometric chords in deliberate sequence (for 4+ matches)
+      for (const edge of constellationTiming.edges) {
+        if (edge.isPerimeter) continue;
+        const from = points[edge.from];
+        const to = points[edge.to];
         if (!from || !to) continue;
+        const chordProgress = frame.reducedMotion ? 1 : clamp((elapsed - edge.startTime) / edge.duration, 0, 1);
+        if (chordProgress <= 0) continue;
+        const endX = from.x + (to.x - from.x) * easeOut(chordProgress);
+        const endY = from.y + (to.y - from.y) * easeOut(chordProgress);
+
+        const isLastEdge = edge.startIndex === constellationTiming.edges.length - 1;
+        const chordAge = elapsed - edge.endTime;
+        const chordFlash = (!frame.reducedMotion && chordAge >= 0 && chordAge < 380)
+          ? clamp(1 - chordAge / 380, 0, 1)
+          : 0;
+        const isFinalLock = isLastEdge && chordFlash > 0;
+        const activeFlash = Math.max(chordFlash, lockFlash);
+
         context.beginPath();
         context.moveTo(from.x, from.y);
-        context.lineTo(to.x, to.y);
-        context.strokeStyle = "rgba(168, 85, 247, 0.18)";
-        context.lineWidth = 0.7;
+        context.lineTo(endX, endY);
+        context.strokeStyle = isFinalLock && chordFlash > 0.25
+          ? `rgba(255, 255, 255, ${0.9 * chordFlash})`
+          : `rgba(168, 85, 247, ${0.22 * chordProgress + activeFlash * 0.22})`;
+        context.lineWidth = 0.9 + activeFlash * 0.6 + (isFinalLock ? chordFlash * 1.4 : 0);
+        context.shadowColor = PALETTE.gold;
+        context.shadowBlur = isFinalLock ? 20 * chordFlash : 0;
         context.stroke();
+        context.shadowBlur = 0;
+
+        if (chordFlash > 0) {
+          context.beginPath();
+          context.arc(to.x, to.y, 5 + chordFlash * (isFinalLock ? 16 : 10), 0, TAU);
+          context.strokeStyle = `rgba(255, 255, 255, ${chordFlash * 0.85})`;
+          context.lineWidth = 1.4;
+          context.shadowColor = PALETTE.gold;
+          context.shadowBlur = 16 * chordFlash;
+          context.stroke();
+          context.shadowBlur = 0;
+
+          if (isFinalLock) {
+            context.beginPath();
+            context.arc(from.x, from.y, 5 + chordFlash * 16, 0, TAU);
+            context.strokeStyle = `rgba(255, 255, 255, ${chordFlash * 0.85})`;
+            context.lineWidth = 1.4;
+            context.shadowColor = PALETTE.gold;
+            context.shadowBlur = 16 * chordFlash;
+            context.stroke();
+            context.shadowBlur = 0;
+          }
+        }
+      }
+
+      // Draw progressive perimeter connecting lines one after another
+      let perimeterIndex = 0;
+      for (const edge of constellationTiming.edges) {
+        if (!edge.isPerimeter) continue;
+        const from = points[edge.from];
+        const to = points[edge.to];
+        if (!from || !to) continue;
+
+        const isLastEdge = edge.startIndex === constellationTiming.edges.length - 1;
+        const startEdge = edge.startTime;
+        const endEdge = edge.endTime;
+        const edgeDuration = edge.duration;
+        perimeterIndex += 1;
+        const edgeProgress = frame.reducedMotion ? 1 : clamp((elapsed - startEdge) / edgeDuration, 0, 1);
+        if (edgeProgress <= 0) continue;
+
+        const drawnX = from.x + (to.x - from.x) * easeOut(edgeProgress);
+        const drawnY = from.y + (to.y - from.y) * easeOut(edgeProgress);
+
+        // Flash briefly as each line completes, with signature lock-in brilliance on final connection
+        const lineAge = elapsed - endEdge;
+        const lineFlash = (!frame.reducedMotion && lineAge >= 0 && lineAge < 380)
+          ? clamp(1 - lineAge / 380, 0, 1)
+          : 0;
+        const isFinalLock = isLastEdge && lineFlash > 0;
+        const activeFlash = Math.max(lineFlash, lockFlash);
+
+        // Ambient violet edge halo
+        context.beginPath();
+        context.moveTo(from.x, from.y);
+        context.lineTo(drawnX, drawnY);
+        context.strokeStyle = `rgba(168, 85, 247, ${0.35 * Math.min(1, edgeProgress * 1.5) + activeFlash * 0.25})`;
+        context.lineWidth = 3.6 + activeFlash * 1.8 + (isFinalLock ? lineFlash * 1.6 : 0);
+        context.stroke();
+
+        // Core progressive golden filament
+        context.beginPath();
+        context.moveTo(from.x, from.y);
+        context.lineTo(drawnX, drawnY);
+        const filament = context.createLinearGradient(from.x, from.y, drawnX, drawnY);
+        filament.addColorStop(0, "rgba(250, 204, 21, 0.92)");
+        filament.addColorStop(0.5, isFinalLock && lineFlash > 0.3 ? "rgba(255, 255, 255, 1)" : activeFlash > 0.3 ? `rgba(255, 255, 255, ${0.85 + activeFlash * 0.15})` : "rgba(254, 240, 138, 0.95)");
+        filament.addColorStop(1, edgeProgress < 0.98 ? "rgba(254, 240, 138, 1)" : "rgba(250, 204, 21, 0.95)");
+        context.strokeStyle = isFinalLock && lineFlash > 0.4 ? "rgba(255, 255, 255, 0.95)" : filament;
+        context.lineWidth = 1.7 + activeFlash * 1.8 + (isFinalLock ? lineFlash * 1.6 : 0);
+        context.shadowColor = activeFlash > 0.4 || isFinalLock ? PALETTE.white : PALETTE.gold;
+        context.shadowBlur = 14 + activeFlash * 18 + (isFinalLock ? lineFlash * 16 : 0);
+        context.stroke();
+        context.shadowBlur = 0;
+
+        // Leading photon spark while drawing
+        if (edgeProgress < 0.98 && !frame.reducedMotion) {
+          context.beginPath();
+          context.arc(drawnX, drawnY, 3.4, 0, TAU);
+          context.fillStyle = PALETTE.white;
+          context.shadowColor = PALETTE.gold;
+          context.shadowBlur = 18;
+          context.fill();
+          context.shadowBlur = 0;
+        }
+
+        // Illumination pulse at arrival vertex upon completion (both ends for final closure)
+        if (lineFlash > 0) {
+          context.beginPath();
+          context.arc(to.x, to.y, 6 + lineFlash * (isFinalLock ? 18 : 14), 0, TAU);
+          context.strokeStyle = `rgba(255, 255, 255, ${lineFlash * 0.85})`;
+          context.lineWidth = isFinalLock ? 2 : 1.6;
+          context.shadowColor = PALETTE.gold;
+          context.shadowBlur = (isFinalLock ? 22 : 16) * lineFlash;
+          context.stroke();
+          context.shadowBlur = 0;
+
+          if (isFinalLock) {
+            context.beginPath();
+            context.arc(from.x, from.y, 6 + lineFlash * 18, 0, TAU);
+            context.strokeStyle = `rgba(255, 255, 255, ${lineFlash * 0.85})`;
+            context.lineWidth = 2;
+            context.shadowColor = PALETTE.gold;
+            context.shadowBlur = 22 * lineFlash;
+            context.stroke();
+            context.shadowBlur = 0;
+          }
+        }
+
+        // Settled circulating photon packet along closed perimeter
+        if (formationComplete && !frame.reducedMotion) {
+          const tPacket = (elapsed * 0.00032 + perimeterIndex * 0.28) % 1;
+          const px = from.x + (to.x - from.x) * tPacket;
+          const py = from.y + (to.y - from.y) * tPacket;
+          context.beginPath();
+          context.arc(px, py, 1.7, 0, TAU);
+          context.fillStyle = PALETTE.gold;
+          context.shadowColor = PALETTE.gold;
+          context.shadowBlur = 10;
+          context.fill();
+          context.shadowBlur = 0;
+        }
+      }
+
+      // Glowing connection points at constellation vertices with temporary brightness intensification
+      const starIntensify = (!frame.reducedMotion && lockAge >= 0 && lockAge < 850)
+        ? clamp(1 - lockAge / 850, 0, 1)
+        : 0;
+
+      for (let i = 0; i < points.length; i += 1) {
+        const pt = points[i];
+        if (!pt) continue;
+        const memory = recallRecords[i];
+        const selected = frame.selectedId === memory?.id;
+        const hovered = frame.hoveredId === memory?.id;
+        const baseRadius = 5.5 + (selected ? 1.5 : 0) + starIntensify * 1.5;
+
+        context.beginPath();
+        context.arc(pt.x, pt.y, baseRadius + (hovered || selected ? 8 : 6), 0, TAU);
+        context.strokeStyle = `rgba(250, 204, 21, ${0.85 + starIntensify * 0.15})`;
+        context.lineWidth = (selected ? 1.8 : 1.2) + starIntensify * 0.8;
+        context.stroke();
+
+        context.beginPath();
+        context.arc(pt.x, pt.y, baseRadius, 0, TAU);
+        context.fillStyle = starIntensify > 0.45 ? PALETTE.white : PALETTE.gold;
+        context.shadowColor = PALETTE.gold;
+        context.shadowBlur = (hovered || selected ? 22 : 16) + starIntensify * 20;
+        context.fill();
+        context.shadowBlur = 0;
+      }
+
+      // SATISFYING COMPLETION PULSE (Energy release on final connection lock-in)
+      if (formationComplete && !frame.reducedMotion) {
+        if (lockAge >= 0 && lockAge < 1800) {
+          const cx = points.reduce((sum, p) => sum + p.x, 0) / matchCount;
+          const cy = points.reduce((sum, p) => sum + p.y, 0) / matchCount;
+          const constellationRadius = Math.max(...points.map((p) => Math.hypot(p.x - cx, p.y - cy)));
+          const pulseDecay = clamp(1 - lockAge / 1800, 0, 1);
+
+          // 1. Soft expanding circular aura ripple
+          const rippleProg = clamp(lockAge / 1400, 0, 1);
+          const rRipple = constellationRadius * (0.85 + 1.45 * easeOut(rippleProg));
+          const rippleAlpha = (1 - rippleProg) * 0.78;
+          if (rippleAlpha > 0) {
+            context.beginPath();
+            context.ellipse(cx, cy, rRipple, rRipple * 0.74, 0, 0, TAU);
+            context.strokeStyle = `rgba(250, 204, 21, ${rippleAlpha * 0.9})`;
+            context.lineWidth = 2.2 * pulseDecay;
+            context.shadowColor = PALETTE.gold;
+            context.shadowBlur = 22 * pulseDecay;
+            context.stroke();
+            context.shadowBlur = 0;
+          }
+
+          // 2. Secondary purple refraction wave (layered golden-purple energy pulse)
+          const sAge = lockAge - 70;
+          if (sAge > 0) {
+            const sProg = clamp(sAge / 1500, 0, 1);
+            const r2 = constellationRadius * (0.75 + 1.75 * easeOut(sProg));
+            const alpha2 = (1 - sProg) * 0.72;
+            context.beginPath();
+            context.ellipse(cx, cy, r2, r2 * 0.74, 0, 0, TAU);
+            context.strokeStyle = `rgba(168, 85, 247, ${alpha2 * 0.85})`;
+            context.lineWidth = 1.7 * pulseDecay;
+            context.shadowColor = PALETTE.violet;
+            context.shadowBlur = 18 * pulseDecay;
+            context.stroke();
+            context.shadowBlur = 0;
+          }
+
+          // 3. Layered soft golden-purple atmospheric bloom
+          const bloomProg = clamp(lockAge / 1150, 0, 1);
+          if (bloomProg < 1) {
+            const bloomRadius = constellationRadius * (1.1 + 1.1 * easeOut(bloomProg));
+            const bloomAlpha = (1 - bloomProg) * 0.34;
+            const bloom = context.createRadialGradient(cx, cy, 0, cx, cy, bloomRadius);
+            bloom.addColorStop(0, `rgba(250, 204, 21, ${bloomAlpha * 0.75})`);
+            bloom.addColorStop(0.38, `rgba(168, 85, 247, ${bloomAlpha * 0.5})`);
+            bloom.addColorStop(0.72, `rgba(124, 58, 237, ${bloomAlpha * 0.18})`);
+            bloom.addColorStop(1, "rgba(3, 4, 11, 0)");
+            context.fillStyle = bloom;
+            context.beginPath();
+            context.ellipse(cx, cy, bloomRadius, bloomRadius * 0.74, 0, 0, TAU);
+            context.fill();
+          }
+
+          // 4. Vertex energy flare bursts
+          const flareProg = clamp(lockAge / 600, 0, 1);
+          if (flareProg < 1) {
+            const flareRadius = 8 + easeOut(flareProg) * 22;
+            const flareAlpha = (1 - flareProg) * 0.78;
+            for (const pt of points) {
+              context.beginPath();
+              context.arc(pt.x, pt.y, flareRadius, 0, TAU);
+              context.strokeStyle = `rgba(250, 204, 21, ${flareAlpha})`;
+              context.lineWidth = 1.4;
+              context.shadowColor = PALETTE.gold;
+              context.shadowBlur = 16 * flareAlpha;
+              context.stroke();
+              context.shadowBlur = 0;
+            }
+          }
+        }
       }
     }
   }
