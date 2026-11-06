@@ -66,6 +66,49 @@ def test_recalls_recurring_patterns():
         assert events[-1].type == "suggestion"
 
 
+def test_most_recent_match_ranks_first():
+    agent = MockAgent(token_delay_ms=0)
+    asyncio.run(agent.ingest_history(_seed_contexts()))
+    cases = {
+        ("api-gateway", "api-gateway: 502 Bad Gateway after deploy of v2.58.0",
+         "[FIRING] ApiGateway5xxRate: 502 rate 16.0% on api-gateway. Started 3 minutes after deploy of release v2.58.0.",
+         '{"status":502,"response_flags":"UC","body":"upstream connect error or disconnect/reset before headers"}'):
+            "INC-1020",
+        ("payments-api", "payments-api: connection pool exhausted, checkout payments failing",
+         "[FIRING] PaymentsApiHighErrorRate: 5xx rate 38.2%. HikariPool-1 active=40/40, pending=212.",
+         "HikariPool-1 - Connection is not available, request timed out after 30000ms."):
+            "INC-1017",
+        ("notification-worker", "notification-worker: OOMKilled during monthly statement batch",
+         "[FIRING] KubePodCrashLooping: restarted 5 times in 15m (last state: OOMKilled).",
+         "Reason: OOMKilled\nExit Code: 137"):
+            "INC-1018",
+    }
+    for (service, title, alert, logs), newest in cases.items():
+        events = _run(agent, _new(service, title, alert, logs))
+        memories = [e for e in events if e.type == "memory"]
+        assert memories[0].past_incident_id == newest, (service, [m.past_incident_id for m in memories])
+        assert f"Likely a repeat of {newest}" in events[-1].likely_root_cause
+
+
+def test_learns_incident_type_without_known_signature():
+    agent = MockAgent(token_delay_ms=0)
+    asyncio.run(agent.ingest_history(_seed_contexts()))
+    title = "search-api: Elasticsearch cluster red, search returning empty results"
+    alert = "[FIRING] ElasticsearchClusterRed: cluster search-prod status RED, 14 unassigned primary shards."
+    first = _new("search-api", title, alert)
+    assert [e for e in _run(agent, first) if e.type == "memory"] == []
+
+    resolution = ResolutionContext(root_cause="es-node-2 disk over 90% watermark",
+                                   fix_that_worked="Freed disk on es-node-2 and rerouted unassigned shards")
+    asyncio.run(agent.learn_from_resolution(first, resolution))
+
+    repeat = _new("search-api", title, alert).model_copy(update={"id": "INC-9002"})
+    events = _run(agent, repeat)
+    assert [e.past_incident_id for e in events if e.type == "memory"] == ["INC-9001"]
+    assert events[-1].likely_root_cause.startswith("Likely a repeat of INC-9001")
+    assert "Free disk on es-node-2 and reroute unassigned shards" in events[-1].steps
+
+
 def test_unrelated_incident_on_same_service_not_recalled():
     agent = MockAgent(token_delay_ms=0)
     asyncio.run(agent.ingest_history(_seed_contexts()))

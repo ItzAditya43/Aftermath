@@ -105,6 +105,27 @@ def test_analyze_agent_exception_becomes_error_event(client, app, make_incident,
     assert "groq rate limited" in timeline[-1]["message"]
 
 
+def test_interrupted_reanalysis_keeps_previous_analysis(client, app, seeded, make_incident, analyze):
+    incident = make_incident()
+    analyze(incident["id"])
+    before = client.get(f"/incidents/{incident['id']}").json()
+    memories_before = client.get(f"/incidents/{incident['id']}/memories").json()
+    assert memories_before and before["last_suggestion"]
+
+    async def cut_off(ctx):
+        yield {"type": "memory", "past_incident_id": "INC-1002", "title": "t", "service": "api-gateway",
+               "summary": "unrelated", "relevance_score": 0.5}
+        yield TokenEvent(text="Thinking ")
+        raise ConnectionError("stream dropped")
+
+    app.state.agent.analyze = cut_off
+    assert [n for n, _ in analyze(incident["id"])] == ["memory", "token", "error"]
+
+    after = client.get(f"/incidents/{incident['id']}").json()
+    assert client.get(f"/incidents/{incident['id']}/memories").json() == memories_before
+    assert after["last_suggestion"] == before["last_suggestion"]
+
+
 def test_analyze_accepts_dict_events_and_skips_self_reference(client, app, make_incident, analyze):
     incident = make_incident()
 

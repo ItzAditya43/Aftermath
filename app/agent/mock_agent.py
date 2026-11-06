@@ -124,10 +124,14 @@ class Match:
 class MockAgent:
     name = "mock"
 
-    def __init__(self, token_delay_ms: int = 30, max_memories: int = 3, threshold: float = 0.45):
+    def __init__(
+        self, token_delay_ms: int = 30, max_memories: int = 3, threshold: float = 0.45, recency_bonus: float = 0.10
+    ):
         self.token_delay = max(token_delay_ms, 0) / 1000
         self.max_memories = max_memories
         self.threshold = threshold
+        self.recency_bonus = recency_bonus
+        self.keyword_only_threshold = 0.5
         self.memory: dict[str, MemoryEntry] = {}
 
     # -- AgentService ---------------------------------------------------------
@@ -188,15 +192,26 @@ class MockAgent:
             if entry.incident.id == current.incident.id:
                 continue
             shared = [label for label in current.signatures if label in entry.signatures]
-            if not shared:
-                continue
-            sig_score = len(shared) / len(current.signatures)
             union = current.keywords | entry.keywords
             kw_score = len(current.keywords & entry.keywords) / len(union) if union else 0.0
-            service_score = 1.0 if entry.incident.service == current.incident.service else 0.0
+            same_service = entry.incident.service == current.incident.service
+            # No known signature in common: still recall a same-service incident whose alert reads
+            # the same. Otherwise the agent could never learn failure types missing from SIGNATURES.
+            if not shared and not (same_service and kw_score >= self.keyword_only_threshold):
+                continue
+            sig_score = len(shared) / len(current.signatures) if current.signatures else 0.0
+            service_score = 1.0 if same_service else 0.0
             score = 0.30 * service_score + 0.40 * sig_score + 0.30 * kw_score
             if score >= self.threshold:
                 matches.append(Match(entry, score, shared))
+
+        # Prefer recent incidents: the latest fix reflects the current code and release versions,
+        # while older ones can be stale (e.g. "roll back to v2.40.3" when v2.58.0 is live).
+        # The bonus is applied after the threshold, so it reorders matches but never adds new ones.
+        by_age = sorted(matches, key=lambda m: m.entry.incident.created_at)
+        for rank, match in enumerate(by_age):
+            match.score += self.recency_bonus * (rank / (len(by_age) - 1) if len(by_age) > 1 else 1.0)
+
         matches.sort(key=lambda m: (m.score, m.entry.incident.created_at), reverse=True)
         return matches[: self.max_memories]
 
@@ -215,10 +230,14 @@ class MockAgent:
         best = matches[0]
         past = best.entry.incident
         n = len(matches)
+        same_what = (
+            f"shows the same {_join([SIGNATURES[s][0] for s in best.shared])} signature"
+            if best.shared
+            else "has an almost identical alert"
+        )
         parts = [
             f"I found {n} similar incident{'s' if n > 1 else ''} in memory. ",
-            f"The closest match is {past.id} ({past.title}, {past.created_at:%b %d}), which shows the same "
-            f"{_join([SIGNATURES[s][0] for s in best.shared])} signature",
+            f"The closest match is {past.id} ({past.title}, {past.created_at:%b %d}), which {same_what}",
             f"{' on the same service' if past.service == incident.service else ''}. ",
             f"Root cause then: {_clean(past.root_cause)}. What fixed it: {_clean(past.resolution)}.\n\n",
         ]
@@ -268,7 +287,7 @@ class MockAgent:
 
         best = matches[0]
         past = best.entry.incident
-        evidence = best.entry.signatures.get(best.shared[0]) and current.signatures.get(best.shared[0])
+        evidence = best.shared and best.entry.signatures.get(best.shared[0]) and current.signatures.get(best.shared[0])
         steps = []
         if evidence:
             steps.append(f'Confirm the signature: look for "{evidence}" in {incident.service} logs')
@@ -316,6 +335,10 @@ _IMPERATIVE = {
     "restored": "Restore", "resumed": "Resume", "reverted": "Revert", "rolled": "Roll", "rotated": "Rotate",
     "routed": "Route", "scaled": "Scale", "set": "Set", "switched": "Switch", "terminated": "Terminate",
     "updated": "Update", "uploaded": "Upload",
+    "applied": "Apply", "cleared": "Clear", "closed": "Close", "deleted": "Delete", "downgraded": "Downgrade",
+    "expanded": "Expand", "flushed": "Flush", "freed": "Free", "patched": "Patch", "rebalanced": "Rebalance",
+    "rebuilt": "Rebuild", "recreated": "Recreate", "reindexed": "Reindex", "removed": "Remove",
+    "rerouted": "Reroute", "upgraded": "Upgrade",
 }
 
 
