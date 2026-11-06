@@ -172,11 +172,14 @@ async def resolve_incident(
 
 
 def start_analysis(session: Session, incident: Incident) -> IncidentContext:
-    """Mark the incident as being investigated and clear memories from any previous run."""
+    """Mark the incident as being investigated.
+
+    Memories from a previous run are kept until this run succeeds (see `_save_analysis`), so an
+    interrupted or failed run never leaves the incident with partial memories.
+    """
     if incident.status == IncidentStatus.open:
         incident.status = IncidentStatus.investigating
         session.add(incident)
-    session.exec(delete(MemoryReference).where(MemoryReference.incident_id == incident.id))
     add_timeline(session, incident.id, TimelineType.analysis, "Agent started analysis: recalling similar past incidents")
     session.commit()
     session.refresh(incident)
@@ -191,40 +194,26 @@ async def stream_analysis(engine: Engine, agent: AgentService, incident: Inciden
     """Run the agent and translate its events into SSE messages, persisting as we go.
 
     Uses its own DB sessions because the request-scoped session may be closed while streaming.
+    Recalled memories are buffered and saved together with the suggestion in one transaction, so a
+    run that is cut off (client disconnect, server stop, agent error) leaves the previous analysis
+    untouched. This matters for /stats too: "with memory" is decided by saved memory references.
     """
-    recalled: list[str] = []
+    memories: list[MemoryEvent] = []
+    saved = False
     try:
         async for raw in agent.analyze(incident):
             event = raw if not isinstance(raw, dict) else agent_event_adapter.validate_python(raw)
 
             if isinstance(event, MemoryEvent):
-                if event.past_incident_id == incident.id or event.past_incident_id in recalled:
+                if event.past_incident_id == incident.id or any(
+                    m.past_incident_id == event.past_incident_id for m in memories
+                ):
                     continue
-                recalled.append(event.past_incident_id)
-                with Session(engine) as session:
-                    session.add(
-                        MemoryReference(
-                            incident_id=incident.id,
-                            past_incident_id=event.past_incident_id,
-                            summary=event.summary,
-                            relevance_score=event.relevance_score,
-                        )
-                    )
-                    session.commit()
+                memories.append(event)
 
             elif isinstance(event, SuggestionEvent):
-                with Session(engine) as session:
-                    row = session.get(Incident, incident.id)
-                    if row is not None:
-                        row.last_suggestion = event.model_dump(exclude={"type"})
-                        session.add(row)
-                        recalled_text = f"Recalled {', '.join(recalled)}. " if recalled else "No similar past incidents found. "
-                        add_timeline(
-                            session, incident.id, TimelineType.analysis,
-                            f"{recalled_text}Suggested root cause: {event.likely_root_cause} "
-                            f"(confidence {round(event.confidence * 100)}%)",
-                        )
-                        session.commit()
+                _save_analysis(engine, incident.id, memories, event)
+                saved = True
 
             elif isinstance(event, ErrorEvent):
                 yield _sse(event)
@@ -242,4 +231,40 @@ async def stream_analysis(engine: Engine, agent: AgentService, incident: Inciden
         yield _sse(ErrorEvent(code="agent_error", message=str(exc) or exc.__class__.__name__))
         return
 
-    yield _sse(DoneEvent(incident_id=incident.id, memories_used=len(recalled)))
+    if not saved:
+        # The agent finished without a suggestion: still record what it recalled.
+        _save_analysis(engine, incident.id, memories, None)
+    yield _sse(DoneEvent(incident_id=incident.id, memories_used=len(memories)))
+
+
+def _save_analysis(
+    engine: Engine, incident_id: str, memories: list[MemoryEvent], suggestion: SuggestionEvent | None
+) -> None:
+    """Replace the incident's memories (and suggestion, if any) from a completed run, atomically."""
+    with Session(engine) as session:
+        row = session.get(Incident, incident_id)
+        if row is None:
+            return
+        session.exec(delete(MemoryReference).where(MemoryReference.incident_id == incident_id))
+        for m in memories:
+            session.add(
+                MemoryReference(
+                    incident_id=incident_id,
+                    past_incident_id=m.past_incident_id,
+                    summary=m.summary,
+                    relevance_score=m.relevance_score,
+                )
+            )
+        recalled = [m.past_incident_id for m in memories]
+        recalled_text = f"Recalled {', '.join(recalled)}. " if recalled else "No similar past incidents found. "
+        if suggestion is not None:
+            row.last_suggestion = suggestion.model_dump(exclude={"type"})
+            session.add(row)
+            message = (
+                f"{recalled_text}Suggested root cause: {suggestion.likely_root_cause} "
+                f"(confidence {round(suggestion.confidence * 100)}%)"
+            )
+        else:
+            message = f"{recalled_text}The agent returned no suggestion."
+        add_timeline(session, incident_id, TimelineType.analysis, message)
+        session.commit()
