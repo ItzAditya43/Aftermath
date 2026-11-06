@@ -8,7 +8,7 @@ gets better over time.
 | Part | Folder | Owner |
 |---|---|---|
 | Backend API (FastAPI, SQLite, SSE) | `app/`, `data/`, `scripts/` | Manmath |
-| AI agent (Groq, Hindsight) | `app/agent/real_agent.py`, `aftermath_intelligence/` | Aditya |
+| Intelligence engine and real agent (Groq → Gemini → Ollama) | `aftermath_intelligence/`, `app/agent/real_agent.py` | Aditya |
 | Frontend (Next.js) | separate app, calls this API | Shashank |
 
 ---
@@ -144,7 +144,7 @@ useEffect(() => {
 CORS allows the origins in `FRONTEND_ORIGIN` (comma-separated, default `http://localhost:3000`).
 Add the deployed frontend URL there.
 
-### Plugging in the real agent (for Aditya)
+### The agent contract
 
 The backend talks to the agent only through `app/agent/interface.py`:
 
@@ -157,28 +157,20 @@ class AgentService(Protocol):
 
 - `IncidentContext` and `ResolutionContext` are plain Pydantic models, so the agent never touches the database.
 - `analyze` yields `MemoryEvent` (one per recalled incident), then `TokenEvent` chunks, then one `SuggestionEvent`.
-  - The backend sends `done` for you.
-  - If `analyze` raises an exception, the frontend gets an `error` event.
-  - Yielding plain dicts such as `{"type": "token", "text": "..."}` also works.
-- `ingest_history` is called by `POST /admin/seed` with the newly inserted (resolved) incidents.
-- `learn_from_resolution` is called by `POST /incidents/{id}/resolve`. If it raises, the incident still
-  resolves, and the response returns `memory_saved: false`.
-- Optional: `async def reset(self)` is called by `POST /admin/reset`.
+  The backend sends `done`; if `analyze` raises, the frontend gets an `error` event.
+- `ingest_history` is called by `POST /admin/seed`; `learn_from_resolution` by `POST /incidents/{id}/resolve`
+  (if it raises, the incident still resolves with `memory_saved: false`); optional `reset()` by `POST /admin/reset`.
 
-To switch over:
-1. Implement the stub class in `app/agent/real_agent.py`. Its docstring maps each method to Hindsight
-   retain/recall and Groq. You can call `aftermath_intelligence` from it.
-2. Set `AGENT_MODE=real`, `GROQ_API_KEY`, `HINDSIGHT_API_KEY` and `HINDSIGHT_BANK_ID` in `.env`.
-3. Run `pytest`. `tests/test_api_analyze.py` checks the event order and payloads the frontend relies on.
-
-`app/agent/mock_agent.py` is a working reference implementation. You don't need to change anything else in `app/`.
+Two implementations exist: `mock_agent.py` (no keys, scripted recall) and `real_agent.py`, the intelligence engine
+described in [Intelligence engine](#intelligence-engine-aftermath_intelligence). `AGENT_MODE` picks one.
 
 ### Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `AGENT_MODE` | `mock` | `mock` or `real` |
-| `GROQ_API_KEY`, `HINDSIGHT_API_KEY`, `HINDSIGHT_BANK_ID` | empty, empty, `aftermath-incidents` | real agent only |
+| `GROQ_API_KEY`, `GEMINI_API_KEY` | empty | real agent; all other engine settings are listed under [Intelligence engine](#configuration-1) |
+| `HINDSIGHT_API_KEY`, `HINDSIGHT_BANK_ID` | empty, `aftermath-incidents` | reserved for the Hindsight memory adapter (not built yet) |
 | `DATABASE_URL` | `sqlite:///./aftermath.db` | any SQLAlchemy URL (`postgres://` is accepted too) |
 | `FRONTEND_ORIGIN` | `http://localhost:3000` | CORS allowlist, comma-separated |
 | `AUTO_SEED` | `false` | seed on startup if the DB is empty |
@@ -246,7 +238,7 @@ app/
   agent/
     interface.py   AgentService protocol and event types (shared contract)
     mock_agent.py  realistic fake agent
-    real_agent.py  stub for the Groq/Hindsight agent
+    real_agent.py  the intelligence engine behind the contract (AGENT_MODE=real)
     factory.py     picks mock or real from AGENT_MODE
 data/              seed_incidents.json, demo_alerts.json
 scripts/           generate_seed.py
@@ -255,88 +247,188 @@ tests/
 
 ---
 
-## Intelligence package (`aftermath_intelligence/`)
+## Intelligence engine (`aftermath_intelligence/`)
 
-This checkout did not yet contain the shared backend, so the intelligence work
-starts as an installable Python package with no database, API-server, connector,
-or memory ownership. The backend can call these functions and map the Pydantic
-events to its shared schemas during integration.
+The engine works out *why* an incident is happening and what to do about it. It reads the alert and logs, finds
+the first domino rather than the loudest symptom, remembers what fixed (and what did not fix) similar incidents,
+and returns a ranked, evidence-backed diagnosis with a safe plan. `app/agent/real_agent.py` plugs it into the
+backend contract above. It is selected with `AGENT_MODE=real`.
 
-### Local setup
+The AI is a reviewer, not the source of truth. Deterministic analysis does the detective work and shows its
+scoring; the AI checks it and writes the explanation. If every AI provider is down, the analysis still completes.
 
-Copy `.env.example` to `.env` and set the provider keys you plan to use.
-`.env` is ignored by Git. Gemini is the current default; set
-`AI_FALLBACK_PROVIDER=groq` if you want Groq as a fallback. The provider adapter
-makes a request with at most one short retry for temporary errors, moves to the
-fallback on an error or quota response, and caches
-responses locally by prompt hash to avoid spending free-tier quota repeatedly.
-Set `AFTERMATH_LLM_CACHE=0` to disable that cache.
+### How an analysis works
 
-Install, run the checks, and produce a local report:
+1. **Read the evidence.** Logs are normalised from JSON, logfmt, nginx/access logs, Docker output, syslog and
+   plain text, including multi-line Java, Python, Node and Go stack traces. The engine finds the "origin frame",
+   the first line of your own code in the trace.
+2. **Match known failures.** 59 failure signatures (32 core plus 5 domain packs) are matched. Each one is tagged as
+   an origin, mechanism, contributor, symptom or change.
+3. **Flag anomalies, with the reason.** It flags the incident onset, error spikes against a baseline (robust
+   z-score), saturated resources (for example `40/40 connections, 212 waiting`), restart loops and new error types.
+4. **Build the failure chain.** Root cause → contributing factors → triggers → downstream symptoms, as a causal
+   graph whose edges are marked observed, known or inferred.
+5. **Recall memory.** It finds similar past incidents and turns them into lessons: fixes to avoid (they failed or
+   only helped briefly), proven fixes, "similar symptoms, different cause" warnings, and recurrences.
+6. **Rank explanations.** Competing hypotheses are scored with a visible point-by-point breakdown. When the evidence
+   is thin it reports "insufficient evidence" instead of guessing. Scores are rankings, not probabilities, until
+   calibration has enough data (see below).
+7. **AI review (optional).** Groq, falling back to Gemini, then Ollama, assesses the hypotheses. Any evidence
+   reference the AI invents is rejected. Read-only diagnostics (Docker, GitHub) can run here.
+8. **Plan.** Ordered steps: checks first, then mitigations and fixes. Every state-changing step is marked
+   `[needs approval]`, and fixes that failed before become warnings.
+9. **Stream.** Memory events, then the explanation token by token, then one suggestion.
+10. **Learn on resolve.** The confirmed fix and failed attempts are stored, the engine's own prediction is graded,
+    and a restart that only helped briefly is never recorded as the fix.
+
+### Quick start (real mode)
 
 ```bash
-python -m pip install -e ".[test]"
-python -m pytest -q
-python -m aftermath_intelligence.demo --no-llm
+cp .env.example .env
+# set GROQ_API_KEY and GEMINI_API_KEY, then:
+#   AGENT_MODE=real  AI_PROVIDER=groq  AI_FALLBACK_PROVIDER=gemini
+python scripts/check_providers.py          # each provider should print OK (uses a few tokens)
+uvicorn app.main:app --reload
 ```
 
-Run `python -m aftermath_intelligence.demo` to include one compact Gemini
-reasoning request. If the free-tier service is unavailable, the deterministic
-analysis still produces a report.
+Then use the demo requests above, or follow [`docs/DEMO.md`](docs/DEMO.md), a 3-minute walkthrough for judges.
 
-### Using Groq on its free tier
+### Configuration
 
-Keep the Groq account on its Free tier and check the account's Limits and Usage
-pages for actual quotas. Groq limits apply at organization level and vary by
-model and account; the published rate-limit table is for the Developer plan,
-so its numbers are not Free-tier guarantees. This adapter uses Groq's
-OpenAI-compatible `/chat/completions` endpoint, bounds the response, honors
-short `Retry-After` windows, and falls back on quota or service errors. The
-cache avoids repeated identical requests. Parse and summarize logs locally
-before sending evidence to a model.
+All settings are optional except at least one provider key. Defaults are in `.env.example`.
 
-`openai/gpt-oss-20b` is configured because Groq currently lists it as a
-supported production model. If a Free-tier key cannot access it, check the
-active models endpoint (`GET https://api.groq.com/openai/v1/models`) and choose
-a model the account can access. Do not rotate through multiple keys or accounts
-to bypass quotas.
+| Variable | Default | Purpose |
+|---|---|---|
+| `AI_PROVIDER` / `AI_FALLBACK_PROVIDER` | `groq` / `gemini` | Provider chain; the fallback can be a comma list, e.g. `gemini,ollama` |
+| `GROQ_API_KEY`, `GROQ_MODEL` | empty, `openai/gpt-oss-120b` | Groq |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | empty, `gemini-3.5-flash-lite` | Google Gemini |
+| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | `http://localhost:11434/v1`, `gpt-oss:120b-cloud` | Local or self-hosted fallback, no key needed |
+| `AFTERMATH_LLM_TIMEOUT_SECONDS`, `AFTERMATH_LLM_MAX_RETRIES` | `15`, `2` | Per-call limits |
+| `AFTERMATH_LLM_CACHE` | `1` | Cache identical prompts in memory (`AFTERMATH_CACHE_DIR` adds a disk cache) |
+| `AFTERMATH_MAX_LLM_CALLS` | `3` | AI calls allowed per investigation |
+| `AFTERMATH_INVESTIGATION_SECONDS` | `20` | Hard deadline for the investigation, AI calls included |
+| `AFTERMATH_NARRATIVE_FIRST_TOKEN_SECONDS`, `AFTERMATH_NARRATIVE_SECONDS` | `8`, `25` | Use the built-in explanation if the AI is slow |
+| `AFTERMATH_MEMORY_PATH` | `.aftermath/memory.jsonl` | Local incident memory (empty = in-process only) |
+| `AFTERMATH_CALIBRATION_PATH` | `.aftermath/calibration.jsonl` | Graded predictions for calibration |
+| `AFTERMATH_PACKS` | `all` | Domain packs to load: `all`, `none` or a list such as `security,network` |
+| `AFTERMATH_DOCKER_TOOLS`, `DOCKER_SOCKET` | `0`, `/var/run/docker.sock` | Read-only Docker diagnostics |
+| `GITHUB_REPO`, `AFTERMATH_SERVICE_REPOS`, `GITHUB_TOKEN` | empty | Commit and deploy correlation (`svc=owner/repo,...`); the token is optional for public repos |
+| `AFTERMATH_LIVE_TESTS` | `0` | `1` runs `tests/test_live_providers.py` against the real APIs |
 
-Install and run the deterministic analysis:
+`.aftermath/` and `.env` are gitignored.
+
+### AI providers: what to know
+
+- **Groq "403" errors.** Groq's Cloudflare front end blocks Python `urllib`'s default User-Agent. The engine uses
+  `httpx` with an explicit User-Agent; don't swap in `urllib`.
+- **Free-tier limits.** Groq's free tier is about 8,000 tokens per minute, roughly 2 full analyses a minute. On a
+  `429` the router honours `Retry-After`, briefly disables Groq, and Gemini answers instead. Pace live demos, or use
+  a paid key.
+- **Reasoning models** (`gpt-oss`). They are called with low reasoning effort and hidden reasoning. If a stream
+  returns no text, the built-in explanation is used.
+- **Router behaviour.** Bounded retries, a circuit breaker, a per-investigation call budget, structured JSON output
+  with one repair turn, and streaming that can fail over only before the first token.
+
+### Memory, learning and calibration
+
+- `FileMemory` stores one record per resolved incident in `.aftermath/memory.jsonl`. Writes are atomic and the
+  records survive restarts. Reports always say which memory backend was used. It is labelled `local_file` and never
+  claims to be Hindsight.
+- **Hindsight:** a Hindsight adapter only needs `recall(query)` and `retain(record)`, the `IncidentMemory`
+  protocol in `memory.py`. Pass it as `RealAgent(settings, memory=...)`. It isn't built yet; the backend owns it.
+- **Calibration:** each resolve grades the prediction (correct, partially correct, incorrect). After 30 graded
+  outcomes, `confidence` becomes an isotonic-calibrated probability, clamped to 5–95%, and `confidence_calibrated`
+  is set once the backend's `Suggestion` model has that field (#7 / #11).
+
+### Diagnostics connectors (read-only)
+
+| Connector | Tools | Notes |
+|---|---|---|
+| Docker Engine API (unix socket) | `docker_container_logs`, `docker_container_health`, `docker_container_metrics` | Fixed GET requests only; no shell or exec; exact container name or compose service |
+| GitHub REST | `github_recent_commits`, plus commits and workflow runs used for change correlation | GET only; repositories come from config, never from the model |
+
+Tool output becomes evidence that can confirm or weaken a hypothesis. Tools are registered in a `ToolRegistry`;
+anything not read-only needs a single-use human approval, and nothing the AI writes is ever executed.
+
+### Incident packs
+
+The pipeline is domain-neutral; packs add patterns and playbooks for other kinds of incidents.
+
+| Pack | Covers |
+|---|---|
+| `security` | Brute force, injection attempts, privilege escalation, account compromise, malware, exfiltration, leaked secrets |
+| `network` | Link down or flapping, BGP/OSPF down, DNS outage, packet loss and latency |
+| `kubernetes` | Image pull failure, unschedulable pods, node NotReady, evictions, quota exceeded |
+| `data_pipeline` | Consumer lag, schema drift, failed or late jobs, data-quality failures |
+| `industrial` | Overheating, vibration and bearings, pressure excursions, sensor dropout, PLC faults, power events, trips |
+
+To add a pack, create a module in `aftermath_intelligence/packs/` that defines `PACK = Pack(...)` with
+`Signature`s (patterns, checks, mitigations, fixes, avoid, causes), register it in `packs/__init__.py`, and add
+scenarios to `data/eval_scenarios.json`.
+
+### Safety
+
+- **Prompt injection.** Everything sent to an AI is wrapped in `<incident_data>` fences, and instructions inside
+  logs are ignored (tested).
+- **Secrets.** These are redacted before any AI call or report:
+  - passwords, tokens and API keys;
+  - AWS, GitHub, GitLab, Slack and Stripe keys;
+  - JWTs and private keys;
+  - credentials in connection strings.
+
+  A test asserts that none of them reach a provider request.
+- **Approval.** State-changing steps always need human approval; fixes that failed before are blocked and shown as
+  warnings.
+
+### Tests and evaluation
+
+```bash
+pytest                                      # 183 tests, no network or keys needed
+python scripts/evaluate_intelligence.py     # 20 scenarios across 6 fields
+python scripts/check_providers.py [groq]    # live provider smoke test
+AFTERMATH_LIVE_TESTS=1 pytest tests/test_live_providers.py
+```
+
+Current evaluation: 20/20 correct root causes, 20/20 categories, 14/14 symptoms, 0 unsafe steps. CI
+(`.github/workflows/ci.yml`) runs lint, tests and this evaluation on every PR, and fails if accuracy drops or any
+unsafe step appears. [`scripts/qa/`](scripts/qa/README.md) holds the black-box API, browser, UX and accessibility
+checks used in the November review; the evidence is in `docs/qa/`.
+
+### Using the engine directly
 
 ```python
-from aftermath_intelligence import analyze_events, ingest_text
+from aftermath_intelligence.investigation import IncidentCase, InvestigationEngine
+from aftermath_intelligence.presentation import deterministic_narrative, suggestion_fields
 
-parsed = ingest_text(log_text, incident_id="inc-123", source="api.log")
-report = analyze_events(parsed.events)
+report = await InvestigationEngine().run(IncidentCase(
+    incident_id="INC-1", title="checkout failing", service="payments-api",
+    severity="SEV1", alert_text="5xx at 38%", logs=log_text))
+print(report.hypotheses[0].title, report.remediation.warnings)
+print(deterministic_narrative(report)); print(suggestion_fields(report))
 ```
 
-For an LLM task, use `ProviderRouter.complete(...)` or `complete_json(...)` from
-`aftermath_intelligence.providers`. Keep deterministic parsing and correlation
-in the engine; send only compact, relevant evidence to a provider.
+Pass `router=LLMRouter(LLMSettings.from_env())`, `memory=FileMemory(path)` and `tools=registry` to enable the AI,
+memory and diagnostics. `RealAgent.investigation(incident_id)` returns the full report as JSON for the planned
+`GET /incidents/{id}/investigation` endpoint (#12). The report includes the graph, the hypotheses with their score
+breakdowns, the evidence, the plan and a step-by-step replay.
 
-### Implemented intelligence layer
+### Module map
 
-- Text, JSON, JSONL, JSON arrays, timestamped logs, and Python exception traces
-  normalize to provenance-preserving UTC event models. Exact duplicate events
-  are removed without dropping malformed-line locations.
-- Deterministic analysis includes error fingerprints/groups, service and
-  severity distributions, rare errors, co-occurrence, bursts, repeated failure
-  sequences, and robust time-bucket spike detection.
-- Correlation edges identify close-in-time cross-service errors and
-  deployment-before-error associations. Reports label these as correlations,
-  not causal proof.
-- Evidence-linked, competing hypotheses remain unverified until externally
-  confirmed. Gemini/Groq provider selection is runtime-configurable; structured
-  output is validated, unknown evidence IDs are discarded, and provider calls
-  are cached and bounded.
-- The investigation agent has a bounded loop, a connector-owned tool contract,
-  allowlisted arguments, replay events, and strict read-only execution. Any
-  state-changing tool requires approval and is never executed by this package.
-- Safe remediation advice, resolution evaluation, memory-ready payloads,
-  historical similarity/clustering/contradiction checks, prevention signals,
-  replay metrics, reports, and structured postmortems are available as modules.
+| Area | Modules |
+|---|---|
+| Pipeline | `investigation.py` (state machine, limits, replay), `presentation.py` (narrative, suggestion) |
+| Evidence | `ingestion.py`, `stacktrace.py`, `signatures.py`, `packs/`, `anomalies.py`, `evidence.py`, `changes.py` |
+| Reasoning | `causal.py`, `rca.py`, `debate.py`, `prompts.py` |
+| Memory and learning | `memory.py`, `store.py`, `learning.py`, `calibration.py`, `insights.py`, `postmortem.py` |
+| Action | `remediation.py`, `tools.py`, `connectors/` |
+| AI | `llm/` (router, adapters, config, structured output), `redaction.py` |
 
-Docker and GitHub connector implementations, the application backend/database,
-frontend contracts, and Hindsight remain integration points because none of
-those systems are present in this checkout. The package defines adapters for
-connector tools and historical context; it does not fake their results.
+`agent.py`, `analysis.py`, `correlation.py`, `hypotheses.py`, `providers.py`, `engine.py`, `planner.py`,
+`reporting.py` and `demo.py` are the earlier standalone API (`python -m aftermath_intelligence.demo --no-llm`).
+They are kept for compatibility; new work should use `investigation.py`.
+
+### Not done yet
+
+- **Hindsight memory adapter.** The interface exists; `FileMemory` stands in until the adapter is built.
+- **Full-investigation endpoint and UI.** The endpoint is #12 and the screen is #20; the data is already available.
+- **Calibrated confidence.** It needs about 30 real resolved incidents before scores become probabilities.
