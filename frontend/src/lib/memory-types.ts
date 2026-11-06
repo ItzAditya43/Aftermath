@@ -38,6 +38,10 @@ export type IncidentDetail = IncidentSummary & {
   timeline: TimelineEvent[];
 };
 
+export type ResolveResponse = IncidentDetail & {
+  memory_saved: boolean;
+};
+
 export type PastIncidentBrief = {
   id: string;
   title: string;
@@ -135,6 +139,7 @@ export type SceneMemory = {
   createdAt: string | null;
   rootCause: string | null;
   resolution: string | null;
+  failedAttempts: string[];
   timeToResolveMinutes: number | null;
   summary: string | null;
   relevance: number | null;

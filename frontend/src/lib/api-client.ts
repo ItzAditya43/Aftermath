@@ -4,6 +4,7 @@ import type {
   IncidentDetail,
   IncidentSummary,
   MemoryReference,
+  ResolveResponse,
   ResolveIncidentRequest,
   StatsResponse,
 } from "./memory-types";
@@ -11,9 +12,42 @@ import type {
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number | null = null) {
+  constructor(message: string, readonly status: number | null = null, readonly code: string | null = null) {
     super(message);
     this.name = "ApiError";
+  }
+}
+
+type ErrorBody = {
+  detail?: unknown;
+  message?: unknown;
+  error?: unknown;
+};
+
+function errorDetails(body: ErrorBody, fallback: string): { message: string; code: string | null } {
+  const nested = body.error && typeof body.error === "object" ? body.error as Record<string, unknown> : null;
+  const code = typeof nested?.code === "string" ? nested.code : null;
+  const detail = body.detail;
+  const detailMessage = typeof detail === "string"
+    ? detail
+    : Array.isArray(detail)
+      ? detail.map((item) => item && typeof item === "object" && "msg" in item ? String(item.msg) : "").filter(Boolean).join("; ")
+      : null;
+  const message = detailMessage
+    || (typeof body.message === "string" ? body.message : "")
+    || (typeof nested?.message === "string" ? nested.message : "")
+    || (typeof body.error === "string" ? body.error : "")
+    || (code ? `API error: ${code}` : fallback);
+  return { message: code && !message.includes(code) ? `${message} (${code})` : message, code };
+}
+
+async function responseError(response: Response, fallback: string): Promise<ApiError> {
+  try {
+    const body = await response.json() as ErrorBody;
+    const details = errorDetails(body, fallback);
+    return new ApiError(details.message, response.status, details.code);
+  } catch {
+    return new ApiError(fallback, response.status);
   }
 }
 
@@ -31,16 +65,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
-    let message = `The API request failed (${response.status}).`;
-    try {
-      const body = await response.json() as { detail?: string | { msg?: string }[]; message?: string };
-      if (typeof body.detail === "string") message = body.detail;
-      else if (Array.isArray(body.detail) && body.detail[0]?.msg) message = body.detail[0].msg;
-      else if (body.message) message = body.message;
-    } catch {
-      // Keep the status-based message when an upstream error has no JSON body.
-    }
-    throw new ApiError(message, response.status);
+    throw await responseError(response, `The API request failed (${response.status}).`);
   }
 
   return response.json() as Promise<T>;
@@ -71,8 +96,8 @@ export function createIncident(data: CreateIncidentRequest, signal?: AbortSignal
   });
 }
 
-export function resolveIncident(id: string, data: ResolveIncidentRequest, signal?: AbortSignal): Promise<IncidentDetail> {
-  return request<IncidentDetail>(`/incidents/${encodeURIComponent(id)}/resolve`, {
+export function resolveIncident(id: string, data: ResolveIncidentRequest, signal?: AbortSignal): Promise<ResolveResponse> {
+  return request<ResolveResponse>(`/incidents/${encodeURIComponent(id)}/resolve`, {
     method: "POST",
     signal,
     headers: { "Content-Type": "application/json" },
@@ -104,14 +129,7 @@ export async function streamIncidentAnalysis(
   }
 
   if (!response.ok) {
-    let message = `The investigation request failed (${response.status}).`;
-    try {
-      const body = await response.json() as { detail?: string; message?: string };
-      message = body.detail ?? body.message ?? message;
-    } catch {
-      // Use the status message for non-JSON gateway responses.
-    }
-    throw new ApiError(message, response.status);
+    throw await responseError(response, `The investigation request failed (${response.status}).`);
   }
   if (!response.body) throw new ApiError("The investigation response did not include a stream.");
 

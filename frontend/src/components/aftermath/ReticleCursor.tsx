@@ -38,6 +38,7 @@ export default function ReticleCursor({ nodeHovered }: Props) {
     };
     const move = (event: PointerEvent) => {
       if (!enabled) return;
+      document.body.classList.remove("keyboard-navigation");
       targetX = event.clientX;
       targetY = event.clientY;
       const target = event.target instanceof Element ? event.target : null;
@@ -47,6 +48,12 @@ export default function ReticleCursor({ nodeHovered }: Props) {
       cursor.dataset.interactive = interactive || nodeHoveredRef.current ? "true" : "false";
       cursor.dataset.nodeHovered = nodeHoveredRef.current ? "true" : "false";
       if (!frame) frame = window.requestAnimationFrame(animate);
+    };
+    const keyboardInput = (event: KeyboardEvent) => {
+      if (["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", " "].includes(event.key)) {
+        document.body.classList.add("keyboard-navigation");
+        cursor.dataset.hidden = "true";
+      }
     };
     const enter = () => {
       if (!enabled) return;
@@ -76,15 +83,18 @@ export default function ReticleCursor({ nodeHovered }: Props) {
     window.addEventListener("pointermove", move, { passive: true });
     window.addEventListener("pointerover", enter, { passive: true });
     window.addEventListener("pointerout", leave, { passive: true });
+    window.addEventListener("keydown", keyboardInput);
     reducedMotion.addEventListener("change", motionChange);
     finePointer.addEventListener("change", motionChange);
     updateEnabled();
     return () => {
       if (frame) window.cancelAnimationFrame(frame);
       document.body.classList.remove("has-reticle-cursor");
+      document.body.classList.remove("keyboard-navigation");
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerover", enter);
       window.removeEventListener("pointerout", leave);
+      window.removeEventListener("keydown", keyboardInput);
       reducedMotion.removeEventListener("change", motionChange);
       finePointer.removeEventListener("change", motionChange);
     };

@@ -90,6 +90,7 @@ function CreateIncidentForm({
       <div className="grid grid-cols-2 gap-2">
         <label className="block text-[10px] uppercase tracking-[0.14em] text-[#7A8DB5]">Service
           <input name="service" required pattern="[a-z0-9][a-z0-9._-]*" maxLength={64} className="cosmic-input mt-1" placeholder="payments-api" />
+          <span className="mt-1 block normal-case tracking-normal text-[#7A8DB5]">Use lowercase letters, numbers, dots, underscores, or hyphens.</span>
         </label>
         <label className="block text-[10px] uppercase tracking-[0.14em] text-[#7A8DB5]">Severity
           <select value={severity} onChange={(event) => setSeverity(event.target.value as Severity)} className="cosmic-input mt-1">
@@ -138,7 +139,7 @@ function ResolveIncidentForm({
         <textarea name="root_cause" required maxLength={5000} rows={2} defaultValue={suggestion?.likely_root_cause ?? ""} className="cosmic-input mt-1 resize-y" />
       </label>
       <label className="block text-[10px] uppercase tracking-[0.14em] text-[#7A8DB5]">Fix that worked
-        <textarea name="fix_that_worked" required maxLength={5000} rows={2} defaultValue={suggestion?.steps.join(" ") ?? ""} className="cosmic-input mt-1 resize-y" />
+        <textarea name="fix_that_worked" required maxLength={5000} rows={2} defaultValue={suggestion?.steps.join("\n") ?? ""} className="cosmic-input mt-1 resize-y" />
       </label>
       <label className="block text-[10px] uppercase tracking-[0.14em] text-[#7A8DB5]">What failed <span className="normal-case tracking-normal">(one per line)</span>
         <textarea name="what_failed" rows={2} className="cosmic-input mt-1 resize-y" />
@@ -157,19 +158,24 @@ function ResolveIncidentForm({
 export default function AftermathExperience() {
   const [incidents, setIncidents] = useState<IncidentSummary[]>([]);
   const [stats, setStats] = useState<StatsResponse | null>(null);
-  const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
+  const [activeIncidentId, setActiveIncidentId] = useState<string | null>(null);
   const [incident, setIncident] = useState<IncidentDetail | null>(null);
   const [memoryRefs, setMemoryRefs] = useState<MemoryReference[]>([]);
+  const [previousMemoryRefs, setPreviousMemoryRefs] = useState<Record<string, MemoryReference[]>>({});
   const [investigation, setInvestigation] = useState<InvestigationState>(initialInvestigationState);
-  const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
+  const [focusedMemoryId, setFocusedMemoryId] = useState<string | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [loadingWorkspace, setLoadingWorkspace] = useState(true);
   const [loadingIncident, setLoadingIncident] = useState(false);
+  const [analysisRequestActive, setAnalysisRequestActive] = useState(false);
   const [busyAction, setBusyAction] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // Replay is an explicit visual reset; investigation attempts reset only the
+  // recall event choreography, never the one-time constellation introduction.
   const [animationKey, setAnimationKey] = useState(0);
+  const [investigationKey, setInvestigationKey] = useState(0);
   const [paused, setPaused] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
@@ -177,13 +183,16 @@ export default function AftermathExperience() {
   const [incidentSearch, setIncidentSearch] = useState("");
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
   const [dockExpanded, setDockExpanded] = useState(false);
+  const [resolutionFeedback, setResolutionFeedback] = useState<{ incidentId: string; memorySaved: boolean | null } | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const runIdRef = useRef(0);
+  const investigationRunStateRef = useRef<InvestigationState>(initialInvestigationState);
+  const investigationCacheRef = useRef<Record<string, InvestigationState>>({});
   const incidentRef = useRef<IncidentDetail | null>(null);
-  const selectedIncidentIdRef = useRef<string | null>(null);
+  const activeIncidentIdRef = useRef<string | null>(null);
 
   useEffect(() => { incidentRef.current = incident; }, [incident]);
-  useEffect(() => { selectedIncidentIdRef.current = selectedIncidentId; }, [selectedIncidentId]);
+  useEffect(() => { activeIncidentIdRef.current = activeIncidentId; }, [activeIncidentId]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -199,17 +208,24 @@ export default function AftermathExperience() {
       if (controller.signal.aborted) return;
       if (incidentResult.status === "fulfilled") {
         setIncidents(incidentResult.value);
-        const currentId = selectedIncidentIdRef.current;
+        const currentId = activeIncidentIdRef.current;
         const nextSelected = currentId && incidentResult.value.some((item) => item.id === currentId)
           ? currentId
           : (incidentResult.value.find((item) => item.status !== "resolved") ?? incidentResult.value[0])?.id ?? null;
         if (nextSelected !== currentId) {
+          streamAbortRef.current?.abort();
+          runIdRef.current += 1;
+          setAnalysisRequestActive(false);
+          activeIncidentIdRef.current = nextSelected;
+          incidentRef.current = null;
+          investigationRunStateRef.current = investigationCacheRef.current[nextSelected ?? ""] ?? initialInvestigationState;
           setIncident(null);
           setMemoryRefs([]);
-          setInvestigation(initialInvestigationState);
+          setInvestigation(investigationRunStateRef.current);
+          setFocusedMemoryId(null);
           setLoadingIncident(Boolean(nextSelected));
         }
-        setSelectedIncidentId(nextSelected);
+        setActiveIncidentId(nextSelected);
       } else {
         setApiError(incidentResult.reason instanceof Error ? incidentResult.reason.message : "Could not load incidents.");
       }
@@ -221,21 +237,42 @@ export default function AftermathExperience() {
   }, [reloadKey]);
 
   useEffect(() => {
-    if (!selectedIncidentId) return;
+    if (!activeIncidentId) return;
     const controller = new AbortController();
     Promise.allSettled([
-      getIncident(selectedIncidentId, controller.signal),
-      getIncidentMemories(selectedIncidentId, controller.signal),
+      getIncident(activeIncidentId, controller.signal),
+      getIncidentMemories(activeIncidentId, controller.signal),
     ]).then(([incidentResult, memoriesResult]) => {
-      if (controller.signal.aborted) return;
-      if (incidentResult.status === "fulfilled") setIncident(incidentResult.value);
+      if (controller.signal.aborted || activeIncidentIdRef.current !== activeIncidentId) return;
+      if (incidentResult.status === "fulfilled") {
+        incidentRef.current = incidentResult.value;
+        setIncident(incidentResult.value);
+        const cachedInvestigation = investigationCacheRef.current[activeIncidentId];
+        if (cachedInvestigation) {
+          investigationRunStateRef.current = cachedInvestigation;
+          setInvestigation(cachedInvestigation);
+        } else {
+          const restoredInvestigation: InvestigationState = incidentResult.value.last_suggestion
+            ? {
+              ...initialInvestigationState,
+              status: "idle",
+              phase: "idle",
+              memories: memoriesResult.status === "fulfilled" ? memoriesResult.value.map(toMemoryEvent) : [],
+              suggestion: incidentResult.value.last_suggestion,
+            }
+            : initialInvestigationState;
+          investigationCacheRef.current[activeIncidentId] = restoredInvestigation;
+          investigationRunStateRef.current = restoredInvestigation;
+          setInvestigation(restoredInvestigation);
+        }
+      }
       else setApiError(incidentResult.reason instanceof Error ? incidentResult.reason.message : "Could not load incident details.");
       if (memoriesResult.status === "fulfilled") setMemoryRefs(memoriesResult.value);
       else if (incidentResult.status === "fulfilled") setApiError(memoriesResult.reason instanceof Error ? memoriesResult.reason.message : "Could not load incident memories.");
       setLoadingIncident(false);
     });
     return () => controller.abort();
-  }, [selectedIncidentId, reloadKey]);
+  }, [activeIncidentId, reloadKey]);
 
   useEffect(() => () => {
     streamAbortRef.current?.abort();
@@ -269,13 +306,14 @@ export default function AftermathExperience() {
       createdAt: item.created_at,
       rootCause: item.root_cause,
       resolution: null,
+      failedAttempts: [],
       timeToResolveMinutes: item.time_to_resolve_minutes,
       summary: item.alert_text,
       relevance: null,
       recalled: false,
     }));
 
-    if (incident && selectedIncidentId) {
+    if (incident && activeIncidentId) {
       const existing = byId.get(incident.id);
       byId.set(incident.id, {
         id: incident.id,
@@ -286,6 +324,7 @@ export default function AftermathExperience() {
         createdAt: incident.created_at,
         rootCause: incident.root_cause,
         resolution: incident.resolution,
+        failedAttempts: incident.failed_attempts ?? [],
         timeToResolveMinutes: incident.time_to_resolve_minutes,
         summary: incident.alert_text || existing?.summary || null,
         relevance: existing?.relevance ?? null,
@@ -307,6 +346,7 @@ export default function AftermathExperience() {
         createdAt: prior.created_at,
         rootCause: prior.root_cause,
         resolution: prior.resolution,
+        failedAttempts: prior.failed_attempts ?? [],
         timeToResolveMinutes: prior.time_to_resolve_minutes,
         summary: reference.summary,
         relevance: reference.relevance_score,
@@ -326,6 +366,7 @@ export default function AftermathExperience() {
         createdAt: existing?.createdAt ?? null,
         rootCause: event.root_cause ?? existing?.rootCause ?? null,
         resolution: event.resolution ?? existing?.resolution ?? null,
+        failedAttempts: event.failed_attempts ?? existing?.failedAttempts ?? [],
         timeToResolveMinutes: event.time_to_resolve_minutes ?? existing?.timeToResolveMinutes ?? null,
         summary: event.summary,
         relevance: event.relevance_score,
@@ -333,77 +374,141 @@ export default function AftermathExperience() {
       });
     }
     return Array.from(byId.values());
-  }, [incidents, incident, selectedIncidentId, investigation.memories, memoryRefs]);
+  }, [incidents, incident, activeIncidentId, investigation.memories, memoryRefs]);
 
   const visibleIncidents = useMemo(() => {
     const query = incidentSearch.trim().toLowerCase();
     if (!query) return incidents;
     return incidents.filter((item) => `${item.id} ${item.title} ${item.service}`.toLowerCase().includes(query));
   }, [incidents, incidentSearch]);
-  const selectedSummary = incidents.find((item) => item.id === selectedIncidentId) ?? null;
+  const selectedSummary = incidents.find((item) => item.id === activeIncidentId) ?? null;
   const recalls = sceneMemories.filter((memory) => memory.recalled).sort((a, b) => (b.relevance ?? 0) - (a.relevance ?? 0));
-  const selectedMemory = sceneMemories.find((memory) => memory.id === selectedMemoryId) ?? null;
+  const focusedMemory = sceneMemories.find((memory) => memory.id === focusedMemoryId) ?? null;
+  const previouslyRecalled = activeIncidentId ? previousMemoryRefs[activeIncidentId] ?? [] : [];
   const streamActive = investigation.status === "connecting" || investigation.status === "streaming";
 
   const selectMemory = (id: string | null) => {
-    setSelectedMemoryId(id);
+    setFocusedMemoryId(id);
     if (id) setMobilePanel(null);
   };
 
   const selectIncident = (id: string) => {
-    if (id === selectedIncidentId) return;
+    if (id === activeIncidentId) return;
+    const currentRun = investigationRunStateRef.current;
+    if (activeIncidentId && (currentRun.status === "complete" || currentRun.status === "error")) {
+      investigationCacheRef.current[activeIncidentId] = currentRun;
+    } else if (activeIncidentId) {
+      delete investigationCacheRef.current[activeIncidentId];
+    }
     streamAbortRef.current?.abort();
     runIdRef.current += 1;
+    setAnalysisRequestActive(false);
+    activeIncidentIdRef.current = id;
+    incidentRef.current = null;
+    investigationRunStateRef.current = investigationCacheRef.current[id] ?? initialInvestigationState;
     setIncident(null);
     setMemoryRefs([]);
-    setInvestigation(initialInvestigationState);
-    setSelectedMemoryId(null);
+    setInvestigation(investigationRunStateRef.current);
+    setFocusedMemoryId(null);
     setLoadingIncident(true);
     setApiError(null);
-    setSelectedIncidentId(id);
+    setResolutionFeedback(null);
+    setActiveIncidentId(id);
     setShowResolve(false);
     setShowCreate(false);
   };
 
   const startAnalysis = useCallback(async () => {
-    if (!selectedIncidentId || !incidentRef.current) return;
-    streamAbortRef.current?.abort();
+    if (!activeIncidentId) {
+      setApiError("Select an incident before starting an investigation.");
+      return;
+    }
+    const incidentId = activeIncidentId;
+    const activeIncident = incidentRef.current;
+    if (!activeIncident || activeIncident.id !== incidentId) {
+      setApiError(`Incident ${incidentId} is still loading. Wait for its context to finish, then retry.`);
+      return;
+    }
+    if (streamAbortRef.current && !streamAbortRef.current.signal.aborted) return;
     const controller = new AbortController();
     streamAbortRef.current = controller;
     const runId = ++runIdRef.current;
-    let runState = beginInvestigation();
-    setInvestigation(runState);
+    const isCurrentRun = () => !controller.signal.aborted
+      && runId === runIdRef.current
+      && activeIncidentIdRef.current === incidentId;
+    investigationRunStateRef.current = beginInvestigation();
+    investigationCacheRef.current[incidentId] = investigationRunStateRef.current;
+    setAnalysisRequestActive(true);
+    setInvestigation(investigationRunStateRef.current);
+    if (memoryRefs.length > 0) {
+      setPreviousMemoryRefs((current) => ({ ...current, [incidentId]: memoryRefs }));
+    }
     setMemoryRefs([]);
     setApiError(null);
     setPaused(false);
-    setAnimationKey((value) => value + 1);
+    setInvestigationKey((value) => value + 1);
 
     try {
-      await streamIncidentAnalysis(selectedIncidentId, controller.signal, (event) => {
-        if (controller.signal.aborted || runId !== runIdRef.current) return;
-        runState = applyAnalysisEvent(runState, event);
+      await streamIncidentAnalysis(incidentId, controller.signal, (event) => {
+        if (!isCurrentRun()) return;
+        investigationRunStateRef.current = applyAnalysisEvent(investigationRunStateRef.current, event);
         if (event.type === "done") {
           const activeIncident = incidentRef.current;
-          runState = { ...runState, consensus: activeIncident ? hasConsensusEvidence(runState, activeIncident) : false };
+          investigationRunStateRef.current = {
+            ...investigationRunStateRef.current,
+            consensus: activeIncident?.id === incidentId ? hasConsensusEvidence(investigationRunStateRef.current, activeIncident) : false,
+          };
         }
-        setInvestigation(runState);
+        investigationCacheRef.current[incidentId] = investigationRunStateRef.current;
+        setInvestigation(investigationRunStateRef.current);
       });
-      if (controller.signal.aborted || runId !== runIdRef.current) return;
-      const [detailResult, memoryResult] = await Promise.allSettled([
-        getIncident(selectedIncidentId),
-        getIncidentMemories(selectedIncidentId),
+      if (!isCurrentRun()) return;
+      setLoadingIncident(true);
+      const [detailResult, memoryResult, incidentListResult, statsResult] = await Promise.allSettled([
+        getIncident(incidentId, controller.signal),
+        getIncidentMemories(incidentId, controller.signal),
+        getIncidents(controller.signal),
+        getStats(controller.signal),
       ]);
-      if (runId !== runIdRef.current) return;
-      if (detailResult.status === "fulfilled") setIncident(detailResult.value);
+      if (!isCurrentRun()) return;
+      setLoadingIncident(false);
+      const refreshErrors: string[] = [];
+      if (detailResult.status === "fulfilled") {
+        const previousDetail = incidentRef.current?.id === incidentId ? incidentRef.current : null;
+        const refreshedDetail: IncidentDetail = {
+          ...detailResult.value,
+          status: previousDetail?.status === "resolved" ? "resolved" : detailResult.value.status,
+          resolved_at: detailResult.value.resolved_at ?? previousDetail?.resolved_at ?? null,
+          root_cause: detailResult.value.root_cause ?? previousDetail?.root_cause ?? null,
+          resolution: detailResult.value.resolution ?? previousDetail?.resolution ?? null,
+          failed_attempts: detailResult.value.failed_attempts.length > 0
+            ? detailResult.value.failed_attempts
+            : previousDetail?.failed_attempts ?? [],
+        };
+        incidentRef.current = refreshedDetail;
+        setIncident(refreshedDetail);
+      } else refreshErrors.push(detailResult.reason instanceof Error ? `Incident details: ${detailResult.reason.message}` : "Incident details could not refresh.");
       if (memoryResult.status === "fulfilled") setMemoryRefs(memoryResult.value);
-      void getStats().then(setStats).catch(() => setStatsError("Statistics could not be refreshed."));
+      else refreshErrors.push(memoryResult.reason instanceof Error ? `Historical memories: ${memoryResult.reason.message}` : "Historical memories could not refresh.");
+      if (incidentListResult.status === "fulfilled") setIncidents(incidentListResult.value);
+      else refreshErrors.push(incidentListResult.reason instanceof Error ? `Incident status: ${incidentListResult.reason.message}` : "Incident status could not refresh.");
+      if (statsResult.status === "fulfilled") { setStats(statsResult.value); setStatsError(null); }
+      else setStatsError(statsResult.reason instanceof Error ? statsResult.reason.message : "Statistics could not be refreshed.");
+      if (refreshErrors.length) setApiError(`Investigation completed, but some data could not refresh: ${refreshErrors.join(" · ")}`);
     } catch (error) {
-      if (controller.signal.aborted || runId !== runIdRef.current) return;
+      if (!isCurrentRun()) return;
       const message = error instanceof Error ? error.message : "The investigation stream ended unexpectedly.";
-      runState = failInvestigation(runState, message);
-      setInvestigation(runState);
+      investigationRunStateRef.current = failInvestigation(investigationRunStateRef.current, message);
+      investigationCacheRef.current[incidentId] = investigationRunStateRef.current;
+      setInvestigation(investigationRunStateRef.current);
+    } finally {
+      if (streamAbortRef.current === controller) {
+        streamAbortRef.current = null;
+        setAnalysisRequestActive(false);
+      }
+      if (isCurrentRun()) setLoadingIncident(false);
     }
-  }, [selectedIncidentId]);
+  }, [activeIncidentId, memoryRefs]);
 
   const onCreateIncident = async (data: CreateIncidentRequest) => {
     setBusyAction(true);
@@ -411,8 +516,20 @@ export default function AftermathExperience() {
     try {
       const created = await createIncident(data);
       streamAbortRef.current?.abort();
+      runIdRef.current += 1;
+      setAnalysisRequestActive(false);
+      activeIncidentIdRef.current = created.id;
+      incidentRef.current = created;
+      investigationRunStateRef.current = initialInvestigationState;
+      investigationCacheRef.current[created.id] = initialInvestigationState;
+      setMemoryRefs([]);
+      setInvestigation(initialInvestigationState);
+      setFocusedMemoryId(null);
+      setResolutionFeedback(null);
       setIncident(created);
-      setSelectedIncidentId(created.id);
+      setActiveIncidentId(created.id);
+      setLoadingIncident(true);
+      setLoadingWorkspace(true);
       setShowCreate(false);
       setReloadKey((value) => value + 1);
     } catch (error) {
@@ -423,34 +540,68 @@ export default function AftermathExperience() {
   };
 
   const onResolveIncident = async (data: ResolveIncidentRequest) => {
-    if (!selectedIncidentId) return;
+    if (!activeIncidentId) return;
+    const resolvedId = activeIncidentId;
     setBusyAction(true);
     setApiError(null);
     try {
-      const resolved = await resolveIncident(selectedIncidentId, data);
-      setIncident(resolved);
+      const activeStream = streamAbortRef.current;
+      const cancelingActiveStream = activeStream !== null && !activeStream.signal.aborted;
+      activeStream?.abort();
+      runIdRef.current += 1;
+      setAnalysisRequestActive(false);
+      if (cancelingActiveStream) {
+        investigationRunStateRef.current = failInvestigation(investigationRunStateRef.current, "The investigation was stopped because the resolution was submitted.");
+        investigationCacheRef.current[resolvedId] = investigationRunStateRef.current;
+        setInvestigation(investigationRunStateRef.current);
+      }
+      const resolved = await resolveIncident(resolvedId, data);
+      setResolutionFeedback({ incidentId: resolvedId, memorySaved: typeof resolved.memory_saved === "boolean" ? resolved.memory_saved : null });
+      if (activeIncidentIdRef.current === resolvedId) {
+        incidentRef.current = resolved;
+        setIncident(resolved);
+      }
       setShowResolve(false);
-      setIncidents((current) => current.map((item) => item.id === resolved.id ? resolved : item));
-      const [references, latestStats] = await Promise.all([getIncidentMemories(resolved.id), getStats()]);
-      setMemoryRefs(references);
-      setStats(latestStats);
+      if (activeIncidentIdRef.current === resolvedId) setLoadingIncident(true);
+      const [listResult, detailResult, referencesResult, statsResult] = await Promise.allSettled([
+        getIncidents(), getIncident(resolvedId), getIncidentMemories(resolvedId), getStats(),
+      ]);
+      const refreshErrors: string[] = [];
+      if (listResult.status === "fulfilled") setIncidents(listResult.value);
+      else refreshErrors.push(listResult.reason instanceof Error ? `Incident status: ${listResult.reason.message}` : "Incident status could not refresh.");
+      if (activeIncidentIdRef.current === resolvedId) {
+        if (detailResult.status === "fulfilled") { incidentRef.current = detailResult.value; setIncident(detailResult.value); }
+        else refreshErrors.push(detailResult.reason instanceof Error ? `Incident details: ${detailResult.reason.message}` : "Incident details could not refresh.");
+        if (referencesResult.status === "fulfilled") setMemoryRefs(referencesResult.value);
+        else refreshErrors.push(referencesResult.reason instanceof Error ? `Historical memories: ${referencesResult.reason.message}` : "Historical memories could not refresh.");
+      }
+      if (statsResult.status === "fulfilled") { setStats(statsResult.value); setStatsError(null); }
+      else setStatsError(statsResult.reason instanceof Error ? statsResult.reason.message : "Statistics could not be refreshed.");
+      if (refreshErrors.length) setApiError(`Resolution was recorded, but some data could not refresh: ${refreshErrors.join(" · ")}`);
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not save this resolution.");
     } finally {
+      if (activeIncidentIdRef.current === resolvedId) setLoadingIncident(false);
       setBusyAction(false);
     }
   };
 
-  const phaseLabel = investigation.consensus
-    ? "CONSENSUS EVIDENCE THRESHOLD MET"
+  const phaseLabel = loadingIncident ? "LOADING INCIDENT CONTEXT"
+    : investigation.consensus ? "CONSENSUS EVIDENCE THRESHOLD MET"
     : investigation.status === "connecting" ? "CONNECTING TO INVESTIGATION"
+      : investigation.status === "streaming" ? (investigation.phase === "recalling" ? `RECALLING ${investigation.memories.length} INCIDENT${investigation.memories.length === 1 ? "" : "S"}` : "SYNTHESIZING EVIDENCE")
       : investigation.phase === "recalling" ? `RECALLING ${investigation.memories.length} INCIDENT${investigation.memories.length === 1 ? "" : "S"}`
         : investigation.phase === "synthesizing" ? "SYNTHESIZING EVIDENCE"
           : investigation.status === "complete" ? "INVESTIGATION COMPLETE · NO CONSENSUS"
             : investigation.status === "error" ? "STREAM INTERRUPTED"
-              : "MEMORY FIELD READY";
+              : incident?.status === "resolved" ? "RESOLVED · READY TO RE-ANALYZE" : "MEMORY FIELD READY";
 
   const playbookSuggestion = investigation.suggestion;
+  const analyzeButtonLabel = analysisRequestActive
+    ? "Investigation running"
+    : incident?.status === "open"
+      ? "Analyze incident"
+      : "Re-analyze";
   const memoryAssistedAverage = stats?.avg_ttr_with_memory;
   const memoryFreeAverage = stats?.avg_ttr_without_memory;
 
@@ -467,12 +618,14 @@ export default function AftermathExperience() {
         <div className="absolute inset-0 z-0">
           <ConstellationCanvas
             memories={sceneMemories}
-            selectedId={selectedMemoryId}
+            activeIncidentId={activeIncidentId}
+            selectedId={focusedMemoryId}
             onSelect={selectMemory}
             onHover={(id) => { setHoveredNodeId(id); if (id) setMobilePanel(null); }}
             active={streamActive}
             consensus={investigation.consensus}
             animationKey={animationKey}
+            investigationKey={investigationKey}
             paused={paused}
             reducedMotion={reducedMotion}
           />
@@ -510,7 +663,7 @@ export default function AftermathExperience() {
           </button>
         </nav>
 
-        <aside id="incident-context" className={`pointer-events-none absolute left-7 top-[78px] z-20 flex max-h-[calc(100svh-200px)] w-[260px] flex-col gap-3 overflow-y-auto max-lg:left-3 max-lg:top-[74px] max-lg:w-[260px] ${mobilePanel === "incident" ? "max-md:left-2 max-md:right-2 max-md:top-[114px] max-md:z-40 max-md:w-auto max-md:max-h-[22svh]" : "max-md:hidden"}`} aria-label="Incident context">
+        <aside id="incident-context" className={`pointer-events-none absolute left-7 top-[78px] z-20 flex max-h-[calc(100svh-200px)] w-[260px] flex-col gap-3 overflow-y-auto overscroll-contain max-lg:left-3 max-lg:top-[74px] max-lg:w-[260px] ${mobilePanel === "incident" ? "max-md:left-2 max-md:right-2 max-md:top-[114px] max-md:z-40 max-md:w-auto max-md:max-h-[calc(100svh-250px)] max-md:overflow-y-auto" : "max-md:hidden"}`} aria-label="Incident context">
           <FlankCard className="pointer-events-auto">
             <div className="mb-2 flex items-center justify-between gap-2">
               <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-[#7A8DB5]">API data · origin unreported</p>
@@ -530,8 +683,9 @@ export default function AftermathExperience() {
               <>
                 <label htmlFor="incident-picker" className="sr-only">Select incident</label>
                 <div className="relative">
-                  <select id="incident-picker" value={visibleIncidents.some((item) => item.id === selectedIncidentId) ? selectedIncidentId ?? "" : ""} onChange={(event) => { if (event.target.value) selectIncident(event.target.value); }} className="cosmic-input appearance-none pr-8 text-[11px] font-semibold" aria-label="Select incident">
-                    {!visibleIncidents.some((item) => item.id === selectedIncidentId) && <option value="" disabled>{visibleIncidents.length ? "Choose an incident" : "No matching incidents"}</option>}
+                  <select id="incident-picker" value={activeIncidentId ?? ""} onChange={(event) => { if (event.target.value) selectIncident(event.target.value); }} className="cosmic-input appearance-none pr-8 text-[11px] font-semibold" aria-label="Select incident">
+                    {activeIncidentId && !visibleIncidents.some((item) => item.id === activeIncidentId) && <option value={activeIncidentId} disabled>{selectedSummary ? `${selectedSummary.id} · hidden by search` : "Selected incident"}</option>}
+                    {!activeIncidentId && <option value="" disabled>{visibleIncidents.length ? "Choose an incident" : "No matching incidents"}</option>}
                     {visibleIncidents.map((item) => <option key={item.id} value={item.id}>{item.id} · {item.title}</option>)}
                   </select>
                   <ChevronDown size={13} className="pointer-events-none absolute right-3 top-3 text-[#7A8DB5]" />
@@ -548,27 +702,45 @@ export default function AftermathExperience() {
                   <p className="line-clamp-3 text-[10px] leading-relaxed text-[#A9B8D1]">{incident?.alert_text ?? selectedSummary?.alert_text ?? ""}</p>
                   {loadingIncident && <p className="mt-2 flex items-center gap-1.5 text-[9px] text-[#7A8DB5]"><LoaderCircle size={11} className="animate-spin" />Refreshing incident context</p>}
                 </div>
-                {(incident?.root_cause || incident?.resolution) && <div className="mt-3 rounded-lg border border-[rgba(245,199,106,0.2)] bg-[rgba(245,199,106,0.045)] p-3" aria-live="polite">
-                  <p className="font-mono text-[9px] uppercase tracking-wider text-[#FACC15]">Recorded resolution</p>
+                {(incident?.root_cause || incident?.resolution || incident?.failed_attempts.length || incident?.resolved_at) && <div className="mt-3 rounded-lg border border-[rgba(245,199,106,0.2)] bg-[rgba(245,199,106,0.045)] p-3" aria-live="polite">
+                  <p className="font-mono text-[9px] uppercase tracking-wider text-[#FACC15]">Previously saved resolution</p>
+                  {incident.resolved_at && <p className="mt-1 font-mono text-[9px] text-[#38BDF8]">Resolved {formatTimestamp(incident.resolved_at)}</p>}
                   {incident.root_cause && <p className="mt-1 text-[10px] leading-relaxed text-[#E8D5A9]">Cause: {incident.root_cause}</p>}
                   {incident.resolution && <p className="mt-1 text-[10px] leading-relaxed text-[#C4D0E6]">Fix: {incident.resolution}</p>}
+                  {incident.failed_attempts.length > 0 && <div className="mt-1 text-[9px] leading-relaxed text-[#FEF08A]"><b>Previously failed attempts:</b><ul className="list-disc pl-4">{incident.failed_attempts.map((attempt, index) => <li key={`${index}-${attempt}`}>{attempt}</li>)}</ul></div>}
                 </div>}
-                <button type="button" onClick={startAnalysis} disabled={!incident || streamActive} className="cosmic-primary mt-3 w-full disabled:cursor-not-allowed disabled:opacity-55">
-                  {streamActive ? <LoaderCircle size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                  {streamActive ? "Investigation running" : investigation.status === "error" ? "Restart analysis" : "Analyze incident"}
+                {resolutionFeedback?.incidentId === activeIncidentId && <div className={`mt-3 rounded-lg border p-3 text-[10px] leading-relaxed ${resolutionFeedback.memorySaved === true ? "border-[#FACC15]/30 bg-[#FACC15]/[0.06] text-[#FEF08A]" : "border-[#A855F7]/30 bg-[#A855F7]/[0.06] text-[#DDD6FE]"}`} role="status">
+                  <p className="font-mono text-[9px] uppercase tracking-wider">Resolution recorded · {resolutionFeedback.incidentId}</p>
+                  <p className="mt-1">{resolutionFeedback.memorySaved === true ? "Memory successfully saved." : resolutionFeedback.memorySaved === false ? "Memory save unsuccessful; the incident resolution was recorded." : "The API did not confirm whether memory was saved."}</p>
+                </div>}
+                <button type="button" onClick={startAnalysis} disabled={!incident || analysisRequestActive} aria-busy={analysisRequestActive} className="cosmic-primary mt-3 w-full disabled:cursor-not-allowed disabled:opacity-55">
+                  {analysisRequestActive ? <LoaderCircle size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                  {analyzeButtonLabel}
                 </button>
+                {analysisRequestActive && <p className="mt-1 font-mono text-[9px] text-[#38BDF8]" role="status">Streaming latest analysis for {activeIncidentId}.</p>}
+                {investigation.status === "error" && <p className="mt-1 break-words text-[10px] leading-relaxed text-[#FEF08A]" role="alert">Latest analysis failed: {investigation.error}</p>}
                 {incident && incident.status !== "resolved" && <button type="button" onClick={() => setShowResolve((value) => !value)} className="cosmic-quiet mt-2 w-full" aria-expanded={showResolve}><ShieldCheck size={13} /> Record resolution</button>}
                 {showResolve && <div className="mt-3 border-t border-white/[0.08] pt-3"><ResolveIncidentForm busy={busyAction} suggestion={investigation.suggestion} onCancel={() => setShowResolve(false)} onSubmit={onResolveIncident} /></div>}
-                {selectedMemory && <div className="mt-3 rounded-lg border border-[rgba(250,204,21,0.28)] bg-[rgba(250,204,21,0.045)] p-3" aria-live="polite">
-                  <div className="flex items-center justify-between gap-2"><span className="font-mono text-[9px] text-[#FACC15]">LOCKED IN FOCUS · {selectedMemory.id}</span><button type="button" onClick={() => selectMemory(null)} aria-label="Clear selected memory" className="grid min-h-10 min-w-10 place-items-center text-[#DDD6FE] hover:text-white"><X size={14} /></button></div>
-                  <p className="mt-1 text-[10px] font-semibold leading-snug">{selectedMemory.title}</p>
-                  {selectedMemory.rootCause && <p className="mt-1 text-[9px] text-[#A9B8D1]">{selectedMemory.rootCause}</p>}
-                  {selectedMemory.resolution && <p className="mt-1 text-[9px] text-[#FEF08A]">{selectedMemory.resolution}</p>}
+                {focusedMemory && <div className="mt-3 rounded-lg border border-[rgba(250,204,21,0.28)] bg-[rgba(250,204,21,0.045)] p-3" aria-live="polite">
+                  <div className="flex items-center justify-between gap-2"><span className="font-mono text-[9px] text-[#FACC15]">HISTORICAL MEMORY · LOCKED IN FOCUS · {focusedMemory.id}</span><button type="button" onClick={() => selectMemory(null)} aria-label="Clear selected memory" className="grid min-h-10 min-w-10 place-items-center text-[#DDD6FE] hover:text-white"><X size={14} /></button></div>
+                  <p className="mt-1 font-mono text-[8px] text-[#38BDF8]">ACTIVE INCIDENT · {activeIncidentId ?? "NONE"}</p>
+                  <p className="mt-1 text-[10px] font-semibold leading-snug">{focusedMemory.title}</p>
+                  {focusedMemory.rootCause && <p className="mt-1 text-[9px] text-[#A9B8D1]"><b>Root cause:</b> {focusedMemory.rootCause}</p>}
+                  {focusedMemory.failedAttempts.length > 0 && <div className="mt-1 text-[9px] leading-relaxed text-[#FEF08A]"><b>Prior attempts · did not resolve:</b><ul className="list-disc pl-4">{focusedMemory.failedAttempts.map((attempt, index) => <li key={`${index}-${attempt}`}>{attempt}</li>)}</ul></div>}
+                  {focusedMemory.resolution && <p className="mt-1 text-[9px] text-[#FEF08A]"><b>Verified fix:</b> {focusedMemory.resolution}</p>}
                 </div>}
+                {previouslyRecalled.length > 0 && <details className="mt-3 rounded-lg border border-white/[0.08] p-2.5">
+                  <summary className="cursor-pointer font-mono text-[9px] uppercase tracking-wider text-[#A6A0BC]">Previously recalled memories · {previouslyRecalled.length}</summary>
+                  <ul className="mt-2 max-h-32 space-y-1.5 overflow-y-auto">
+                    {previouslyRecalled.map((reference) => <li key={reference.past_incident_id} className="break-words text-[9px] leading-relaxed text-[#9EACC9]">
+                      <b className="font-mono text-[#C4B5FD]">{reference.past_incident_id}</b> · {reference.past_incident?.title ?? reference.summary} · {Math.round(reference.relevance_score * 100)}% match
+                    </li>)}
+                  </ul>
+                </details>}
                 <details className="mt-3 border-t border-[#A855F7]/20 pt-2">
                   <summary className="cursor-pointer py-2 font-mono text-[9px] tracking-wider text-[#DDD6FE]">Accessible memory index · {sceneMemories.length}</summary>
                   <div className="mt-1 max-h-[28vh] space-y-1 overflow-y-auto" aria-label="Memory selection list">
-                    {sceneMemories.map((memory) => <button key={memory.id} type="button" aria-pressed={selectedMemoryId === memory.id} onClick={() => selectMemory(selectedMemoryId === memory.id ? null : memory.id)} className={`flex min-h-10 w-full items-center justify-between gap-2 rounded-md border px-2 text-left text-[10px] ${selectedMemoryId === memory.id ? "border-[#FACC15]/50 bg-[#FACC15]/[0.08] text-[#FEF08A]" : "border-white/[0.06] text-[#DDD6FE] hover:border-[#A855F7]/45"}`}>
+                    {sceneMemories.map((memory) => <button key={memory.id} type="button" aria-pressed={focusedMemoryId === memory.id} onClick={() => selectMemory(focusedMemoryId === memory.id ? null : memory.id)} className={`flex min-h-10 w-full items-center justify-between gap-2 rounded-md border px-2 text-left text-[10px] ${focusedMemoryId === memory.id ? "border-[#FACC15]/50 bg-[#FACC15]/[0.08] text-[#FEF08A]" : "border-white/[0.06] text-[#DDD6FE] hover:border-[#A855F7]/45"}`}>
                       <span className="min-w-0"><b className="mr-2 font-mono text-[#A855F7]">{memory.id}</b><span className="break-words">{memory.title}</span></span>
                       {memory.relevance != null && <span className="shrink-0 font-mono text-[#FACC15]">{Math.round(memory.relevance * 100)}%</span>}
                     </button>)}
@@ -589,15 +761,15 @@ export default function AftermathExperience() {
           </FlankCard>
         </aside>
 
-        <aside id="recall-spine" className={`pointer-events-none absolute right-7 top-[78px] z-20 w-[230px] max-h-[calc(100svh-206px)] max-lg:right-3 max-lg:top-[74px] max-lg:w-[230px] ${mobilePanel === "recall" ? "max-md:left-2 max-md:right-2 max-md:top-[114px] max-md:z-40 max-md:w-auto max-md:max-h-[22svh] max-md:overflow-y-auto" : "max-md:hidden"}`} aria-label="Tactical recall spine">
+        <aside id="recall-spine" className={`pointer-events-none absolute right-7 top-[78px] z-20 w-[230px] max-h-[calc(100svh-206px)] max-lg:right-3 max-lg:top-[74px] max-lg:w-[230px] ${mobilePanel === "recall" ? "max-md:left-2 max-md:right-2 max-md:top-[114px] max-md:z-40 max-md:w-auto max-md:max-h-[calc(100svh-250px)] max-md:overflow-y-auto max-md:overscroll-contain" : "max-md:hidden"}`} aria-label="Tactical recall spine">
           <FlankCard className="pointer-events-auto max-h-[inherit] overflow-hidden !p-3 sm:!p-4">
             <div className="flex items-center justify-between gap-2">
-              <div><p className="font-mono text-[9px] uppercase tracking-[0.15em] text-[#A6A0BC]">Tactical recall spine</p><p className="mt-1 font-mono text-[10px] text-[#FACC15]">{recalls.length} matched incident{recalls.length === 1 ? "" : "s"}</p></div>
+              <div><p className="font-mono text-[9px] uppercase tracking-[0.15em] text-[#A6A0BC]">{investigation.status === "idle" ? "Previously recalled memories" : "Latest analysis recall"}</p><p className="mt-1 font-mono text-[10px] text-[#FACC15]">{recalls.length} matched incident{recalls.length === 1 ? "" : "s"}</p></div>
               <span className="h-2 w-2 rounded-full bg-[#FACC15] shadow-[0_0_9px_#FACC15]" />
             </div>
             <div className="mt-3 max-h-[min(48vh,390px)] space-y-2 overflow-y-auto pr-1" aria-live="polite">
                 {recalls.length === 0 ? <div className="rounded-lg border border-dashed border-white/10 px-3 py-6 text-center text-[10px] leading-relaxed text-[#7383A1]">Recalled incident evidence appears here as the backend sends memory events.</div> : recalls.map((memory) => (
-                <button type="button" key={memory.id} onClick={() => selectMemory(selectedMemoryId === memory.id ? null : memory.id)} aria-pressed={selectedMemoryId === memory.id} className={`group w-full rounded-lg border p-2.5 text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#FACC15] ${selectedMemoryId === memory.id ? "border-[#FACC15]/55 bg-[#FACC15]/[0.08]" : "border-white/[0.07] bg-[#0D1022]/55 hover:border-[#A855F7]/50"}`}>
+                <button type="button" key={memory.id} onClick={() => selectMemory(focusedMemoryId === memory.id ? null : memory.id)} aria-pressed={focusedMemoryId === memory.id} className={`group w-full rounded-lg border p-2.5 text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#FACC15] ${focusedMemoryId === memory.id ? "border-[#FACC15]/55 bg-[#FACC15]/[0.08]" : "border-white/[0.07] bg-[#0D1022]/55 hover:border-[#A855F7]/50"}`}>
                   <span className="flex items-center justify-between gap-1 font-mono text-[9px]"><b className="text-[#DDD6FE]">{memory.id}</b><span className="text-[#FACC15]">{memory.relevance == null ? "MATCH" : `${Math.round(memory.relevance * 100)}%`}</span></span>
                   <span className="mt-1 block line-clamp-2 text-[10px] font-medium leading-snug text-[#D7E1F3]">{memory.title}</span>
                   <span className="mt-1 flex items-center justify-between gap-2 text-[9px] text-[#7A8DB5]"><span className="truncate">{memory.service}</span><span>{formatMinutes(memory.timeToResolveMinutes)}</span></span>
@@ -612,7 +784,12 @@ export default function AftermathExperience() {
           </div>
         </aside>
 
-        <div className="pointer-events-none absolute bottom-[140px] left-1/2 z-10 -translate-x-1/2 text-center max-md:hidden">
+        <div className="pointer-events-auto absolute right-2 top-[120px] z-30 flex gap-1 md:hidden">
+          <button type="button" onClick={() => setPaused((value) => !value)} aria-pressed={paused} className="cosmic-quiet min-h-10 !px-2.5" aria-label={paused ? "Resume constellation animation" : "Pause constellation animation"}>{paused ? <Play size={13} /> : <Pause size={13} />}</button>
+          <button type="button" onClick={() => { setPaused(false); setAnimationKey((value) => value + 1); }} className="cosmic-quiet min-h-10 !px-2.5" aria-label="Replay the current investigation visualization"><RotateCcw size={13} /></button>
+        </div>
+
+        <div className="pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 text-center max-md:hidden" style={{ top: "calc(44% - 130px)" }}>
           <span className="rounded-full border border-[rgba(168,85,247,0.2)] bg-[rgba(3,4,11,0.72)] px-3 py-1 font-mono text-[8px] uppercase tracking-[0.22em] text-[#A6A0BC] backdrop-blur-sm">Incident singularity</span>
         </div>
 
@@ -636,7 +813,7 @@ export default function AftermathExperience() {
                 <h2 className="mt-2 break-words text-[14px] font-bold leading-snug text-[#DDD6FE]">{playbookSuggestion.likely_root_cause}</h2>
               </div>
               <div className="flex min-w-0 flex-col justify-center gap-2 lg:px-2">
-                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#A6A0BC]">Suggested response · from backend analysis</p>
+                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[#A6A0BC]">Latest analysis · suggested response</p>
                 <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                   {playbookSuggestion.steps.map((step, index) => <li key={`${index}-${step}`} className="flex min-w-0 gap-2 break-words text-[12px] leading-relaxed text-[#DDD6FE]"><span className="mt-px shrink-0 font-mono text-[10px] text-[#38BDF8]">{String(index + 1).padStart(2, "0")}</span><span className="min-w-0 break-words">{step}</span></li>)}
                   {playbookSuggestion.steps.length === 0 && <li className="text-[12px] text-[#A6A0BC]">The backend did not return action steps.</li>}
@@ -652,16 +829,18 @@ export default function AftermathExperience() {
             </>
           ) : (
             <div className="flex min-h-[72px] items-center gap-4 px-4 py-3 md:px-6">
-              <div className="hidden shrink-0 items-center gap-2 font-mono text-[9px] uppercase tracking-[0.15em] text-[#38BDF8] sm:flex"><span className={`h-1.5 w-1.5 rounded-full ${streamActive ? "animate-pulse bg-[#38BDF8]" : "bg-[#38BDF8]"}`} />AI NEURAL SYNTHESIS</div>
+              <div className="hidden shrink-0 items-center gap-2 font-mono text-[9px] uppercase tracking-[0.15em] text-[#38BDF8] sm:flex"><span className={`h-1.5 w-1.5 rounded-full ${streamActive ? "animate-pulse bg-[#38BDF8]" : "bg-[#38BDF8]"}`} />AI NEURAL SYNTHESIS · LATEST ANALYSIS</div>
               <div className="min-w-0 flex-1">
                 <p className="mb-1 font-mono text-[8px] uppercase tracking-[0.16em] text-[#7A8DB5] sm:hidden">{phaseLabel}</p>
-                <p className="line-clamp-2 font-mono text-[11px] leading-relaxed text-[#C6D4EC]" aria-live="polite">
-                  {investigation.reasoning || (investigation.status === "error" ? investigation.error : investigation.suggestion?.likely_root_cause) || (investigation.status === "complete" ? "Analysis completed, but the returned evidence did not meet the consensus threshold." : selectedIncidentId ? "Select Analyze incident to stream backend reasoning and recalled evidence." : "Create or select an incident to begin.")}
+                <p className="max-h-[5rem] overflow-y-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-[#C6D4EC]" aria-live={investigation.status === "error" ? "assertive" : "polite"} role={investigation.status === "error" ? "alert" : undefined}>
+                  {investigation.status === "error"
+                    ? [investigation.error, investigation.reasoning].filter(Boolean).join("\n\n")
+                    : investigation.reasoning || investigation.suggestion?.likely_root_cause || (investigation.status === "complete" ? "Analysis completed, but the returned evidence did not meet the consensus threshold." : streamActive ? "Streaming the latest analysis and recalled evidence." : incident?.status === "resolved" ? `Incident ${activeIncidentId} is resolved. Re-analyze to request a new investigation.` : loadingIncident ? "Loading the selected incident context." : activeIncidentId ? "Select Analyze incident to stream backend reasoning and recalled evidence." : "Create or select an incident to begin.")}
                 </p>
                 {investigation.status === "error" && <button type="button" onClick={startAnalysis} className="mt-1 font-mono text-[9px] text-[#FACC15] underline underline-offset-2">Restart the analysis stream</button>}
                 {investigation.status === "complete" && !investigation.consensus && investigation.suggestion && <p className="mt-1 font-mono text-[8px] text-[#FACC15]">Suggestion received · supporting evidence was insufficient for consensus.</p>}
               </div>
-              <div className="hidden shrink-0 text-right font-mono text-[8px] tracking-[0.1em] text-[#657A9F] md:block">{investigation.status === "idle" ? "AWAITING INVESTIGATION" : investigation.status.toUpperCase()}</div>
+              <div className="hidden shrink-0 text-right font-mono text-[8px] tracking-[0.1em] text-[#657A9F] md:block">{incident?.status === "resolved" ? "INCIDENT RESOLVED" : investigation.status === "idle" ? "AWAITING INVESTIGATION" : investigation.status.toUpperCase()}</div>
             </div>
           )}
         </section>

@@ -8,12 +8,14 @@ import { createSceneLayout, createWakeRanks } from "./scene-layout";
 
 type Props = {
   memories: SceneMemory[];
+  activeIncidentId: string | null;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onHover?: (id: string | null) => void;
   active: boolean;
   consensus: boolean;
   animationKey: number;
+  investigationKey: number;
   paused: boolean;
   reducedMotion: boolean;
 };
@@ -28,6 +30,7 @@ type SceneInputs = Pick<Props, "memories" | "selectedId" | "active" | "consensus
 };
 
 const RECALL_TRAVEL_MS = 900;
+const INTRO_DURATION_MS = 6200;
 
 function placeInspectionCard(anchorX: number, anchorY: number, canvasRect: DOMRect): { left: number; top: number; width: number; maxHeight: number } {
   const viewportWidth = window.innerWidth;
@@ -116,6 +119,8 @@ export default function ConstellationCanvas(props: Props) {
     elapsed: 0,
     lastTimestamp: 0,
     animationKey: -1,
+    investigationKey: -1,
+    activeIncidentId: null as string | null,
     recallStartTimes: new Map<string, number>(),
     knownRecallIds: new Set<string>(),
     consensusAt: null as number | null,
@@ -152,48 +157,50 @@ export default function ConstellationCanvas(props: Props) {
   // visual start time at the moment their SSE event reaches the page.
   useEffect(() => {
     const runtime = runtimeRef.current;
-    const reset = runtime.animationKey !== props.animationKey;
-    if (reset) {
-      const hadPreviousRun = runtime.animationKey !== -1;
+    const replayReset = runtime.animationKey !== props.animationKey;
+    const incidentReset = runtime.activeIncidentId !== props.activeIncidentId;
+    const investigationReset = runtime.investigationKey !== props.investigationKey;
+
+    if (replayReset) {
       runtime.animationKey = props.animationKey;
       runtime.elapsed = 0;
       runtime.lastTimestamp = 0;
+      cameraRef.current = { yaw: 0, pitch: 0 };
+    }
+    if (incidentReset) runtime.activeIncidentId = props.activeIncidentId;
+    if (investigationReset) runtime.investigationKey = props.investigationKey;
+
+    if (replayReset || incidentReset || investigationReset) {
       runtime.recallStartTimes.clear();
       runtime.knownRecallIds.clear();
       runtime.consensusAt = null;
       runtime.consensusSeen = false;
-      cameraRef.current = { yaw: 0, pitch: 0 };
-
       const recalled = props.memories.filter((memory) => memory.recalled).sort((a, b) => (b.relevance ?? 0) - (a.relevance ?? 0));
-      if (!props.active && props.consensus && !props.reducedMotion) {
-        recalled.forEach((memory, index) => {
-          runtime.knownRecallIds.add(memory.id);
-          runtime.recallStartTimes.set(memory.id, 900 + index * 300);
-        });
-      } else if (!props.reducedMotion && (props.active || hadPreviousRun)) {
-        recalled.forEach((memory, index) => {
-          runtime.knownRecallIds.add(memory.id);
-          runtime.recallStartTimes.set(memory.id, 900 + index * 300);
-        });
-      } else if (!props.active || props.reducedMotion) {
-        recalled.forEach((memory) => {
-          runtime.knownRecallIds.add(memory.id);
-          runtime.recallStartTimes.set(memory.id, -RECALL_TRAVEL_MS);
-        });
-        if (props.consensus) runtime.consensusAt = -2400;
-      }
-    } else {
-      for (const memory of props.memories) {
-        if (!memory.recalled || runtime.knownRecallIds.has(memory.id)) continue;
+      recalled.forEach((memory, index) => {
         runtime.knownRecallIds.add(memory.id);
-        runtime.recallStartTimes.set(memory.id, props.active && !props.reducedMotion ? runtime.elapsed : -RECALL_TRAVEL_MS);
-      }
+        const startAt = replayReset && !props.reducedMotion
+          ? 650 + index * 260
+          : props.active && !props.reducedMotion
+            ? runtime.elapsed
+            : -RECALL_TRAVEL_MS;
+        runtime.recallStartTimes.set(memory.id, startAt);
+      });
     }
+
+    for (const memory of props.memories) {
+      if (!memory.recalled || runtime.knownRecallIds.has(memory.id)) continue;
+      runtime.knownRecallIds.add(memory.id);
+      runtime.recallStartTimes.set(memory.id, props.active && !props.reducedMotion ? runtime.elapsed : -RECALL_TRAVEL_MS);
+    }
+
     if (props.reducedMotion) {
       for (const memory of props.memories) {
         if (memory.recalled) runtime.recallStartTimes.set(memory.id, -RECALL_TRAVEL_MS);
       }
-      if (props.consensus && !runtime.consensusSeen && props.reducedMotion) runtime.consensusAt = -2400;
+      if (props.consensus) runtime.consensusAt = runtime.elapsed - 2400;
+      else runtime.consensusAt = null;
+    } else if (!props.consensus) {
+      runtime.consensusAt = null;
     }
     runtime.consensusSeen = props.consensus;
     inputsRef.current = { ...props, layout, serviceEdges, wakeRanks, hoveredId };
@@ -235,6 +242,7 @@ export default function ConstellationCanvas(props: Props) {
       context.setTransform(dpr, 0, 0, dpr, 0, 0);
       positionsRef.current = drawScene(context, inputs.memories, inputs.layout, inputs.serviceEdges, {
         elapsed: runtime.elapsed,
+        introProgress: inputs.reducedMotion ? 1 : Math.min(1, runtime.elapsed / INTRO_DURATION_MS),
         width,
         height,
         camera: cameraRef.current,
@@ -296,7 +304,14 @@ export default function ConstellationCanvas(props: Props) {
   const pickNode = (x: number, y: number): string | null => {
     let picked: string | null = null;
     let distance = 20;
+    const introProgress = props.reducedMotion ? 1 : Math.min(1, runtimeRef.current.elapsed / INTRO_DURATION_MS);
     for (const [id, point] of positionsRef.current) {
+      const memory = props.memories.find((candidate) => candidate.id === id);
+      if (!memory?.recalled) {
+        const rank = wakeRanks.get(id) ?? 0;
+        const revealStart = 0.04 + rank * 0.48;
+        if (introProgress <= revealStart) continue;
+      }
       const candidate = Math.hypot(point.x - x, point.y - y);
       if (candidate < distance) {
         distance = candidate;
@@ -387,6 +402,8 @@ export default function ConstellationCanvas(props: Props) {
         >
           <div className="mb-2 flex items-start justify-between gap-3">
             <div className="min-w-0">
+              <p className="font-mono text-[8px] tracking-[0.1em] text-[#38BDF8]">ACTIVE INCIDENT · {props.activeIncidentId ?? "NONE"}</p>
+              <p className="mt-1 font-mono text-[9px] tracking-[0.14em] text-[#A855F7]">{inspectionMemory.id === props.activeIncidentId ? "ACTIVE INCIDENT MEMORY" : "HISTORICAL MEMORY"}</p>
               <p className="font-mono text-[9px] tracking-[0.14em] text-[#FACC15]">{props.selectedId === inspectionMemory.id ? "LOCKED IN FOCUS" : "HOVER PREVIEW"}</p>
               <p className="mt-1 break-all font-mono text-[10px] text-[#DDD6FE]">{inspectionMemory.id}</p>
             </div>
@@ -399,6 +416,7 @@ export default function ConstellationCanvas(props: Props) {
             {inspectionMemory.timeToResolveMinutes != null && <span>TTR {inspectionMemory.timeToResolveMinutes}m</span>}
           </div>
           {inspectionMemory.rootCause && <p className="mt-2 break-words text-[11px] leading-relaxed text-[#DDD6FE]"><b className="text-[#A855F7]">Root cause</b><br />{inspectionMemory.rootCause}</p>}
+          {inspectionMemory.failedAttempts.length > 0 && <div className="mt-2 break-words text-[11px] leading-relaxed text-[#FEF08A]"><b className="text-[#FACC15]">Prior attempts · did not resolve</b><ul className="mt-1 list-disc space-y-1 pl-4">{inspectionMemory.failedAttempts.map((attempt, index) => <li key={`${index}-${attempt}`}>{attempt}</li>)}</ul></div>}
           {inspectionMemory.resolution && <p className="mt-2 break-words text-[11px] leading-relaxed text-[#FEF08A]"><b>Verified fix</b><br />{inspectionMemory.resolution}</p>}
           {inspectionMemory.summary && <p className="mt-2 break-words border-t border-[#A855F7]/20 pt-2 text-[10px] leading-relaxed text-[#C4B5FD]"><b className="text-[#A855F7]">{inspectionMemory.recalled ? "Historical evidence" : "Incident context"}</b><br />{inspectionMemory.summary}</p>}
         </section>,

@@ -70,6 +70,7 @@ export function toMemoryEvent(reference: {
     service: string;
     root_cause: string | null;
     resolution: string | null;
+    failed_attempts: string[];
     time_to_resolve_minutes: number | null;
   } | null;
 }): MemoryEvent {
@@ -83,7 +84,7 @@ export function toMemoryEvent(reference: {
     relevance_score: reference.relevance_score,
     root_cause: incident?.root_cause ?? null,
     resolution: incident?.resolution ?? null,
-    failed_attempts: [],
+    failed_attempts: incident?.failed_attempts ?? [],
     time_to_resolve_minutes: incident?.time_to_resolve_minutes ?? null,
   };
 }

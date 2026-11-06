@@ -1,36 +1,74 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Aftermath Frontend
 
-## Getting Started
+The Aftermath frontend is a Next.js App Router client for incident response and historical memory investigation. It uses the FastAPI service for incident data, SSE analysis, resolution recording, and statistics. The constellation renders backend incidents and recalled memories; it does not provide production incident fixtures.
 
-First, run the development server:
+## Prerequisites
+
+- Node.js 20.9 or newer
+- npm (the repository includes `package-lock.json`)
+- The Aftermath FastAPI backend for live incident workflows
+
+## Install
+
+From this directory:
+
+```bash
+npm ci
+```
+
+## Environment configuration
+
+Create `frontend/.env.local` for local development:
+
+```dotenv
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+`NEXT_PUBLIC_API_URL` is the base URL used by browser-side API calls. It is embedded into the frontend at build time, so set it in the environment used for `npm run build`. Do not put API secrets in a `NEXT_PUBLIC_*` variable.
+
+The FastAPI backend must allow the frontend origin through its CORS setting. Configure `FRONTEND_ORIGIN` in the backend environment, for example:
+
+```dotenv
+FRONTEND_ORIGIN=http://localhost:3000
+```
+
+For multiple frontend origins, provide a comma-separated list, such as `http://localhost:3000,https://aftermath.example.com`. Set the value to the exact scheme and host used by the browser, without a trailing slash.
+
+## Local development
+
+Start the backend first, then run the frontend from `frontend/`:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000). The browser calls the configured API directly; an unavailable or disallowed backend is shown as an API error in the app.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The frontend uses these backend routes:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `GET /incidents`, `GET /incidents/{id}`, and `GET /incidents/{id}/memories`
+- `GET /incidents/{id}/analyze` as a fetch-based Server-Sent Events stream
+- `POST /incidents` and `POST /incidents/{id}/resolve`
+- `GET /stats`
 
-## Learn More
+## Quality checks and production build
 
-To learn more about Next.js, take a look at the following resources:
+Run from `frontend/`:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npx tsc --noEmit
+npm run lint
+npm run build
+npm run start
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+`npm run start` serves the most recent production build. The development server is not a substitute for verifying the production build.
 
-## Deploy on Vercel
+## Deployment
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+1. Set `NEXT_PUBLIC_API_URL` to the public HTTPS base URL of the deployed FastAPI service in the frontend build environment.
+2. Build and deploy the Next.js app with `npm run build` and the platform's Next.js deployment integration (or run `npm run start` on a Node.js host).
+3. Set backend `FRONTEND_ORIGIN` to the deployed frontend origin. Include any separate preview origins that need browser access, comma-separated.
+4. Keep database and agent credentials in the backend environment only. Rebuild the frontend whenever its public API URL changes.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Resolution feedback reports memory persistence only when the resolution API confirms it through `memory_saved`.

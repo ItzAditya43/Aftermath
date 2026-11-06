@@ -106,7 +106,7 @@ button { cursor: pointer; }
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
 }
-.dock-expanded { max-height: min(58svh, 420px); }
+.dock-expanded { max-height: min(34svh, 420px); }
 
 .memory-inspection-card {
   position: fixed;
@@ -135,13 +135,14 @@ button { cursor: pointer; }
 .reticle-cursor[data-node-hovered="true"]::before { transform: scale(1.42); border-color: #facc15; box-shadow: 0 0 14px rgba(250, 204, 21, 0.45); }
 .reticle-cursor[data-hidden="true"] { visibility: hidden; }
 body.has-reticle-cursor, body.has-reticle-cursor * { cursor: none !important; }
+body.has-reticle-cursor.keyboard-navigation, body.has-reticle-cursor.keyboard-navigation * { cursor: auto !important; }
 body.has-reticle-cursor input:not([type=button]):not([type=submit]), body.has-reticle-cursor textarea, body.has-reticle-cursor [contenteditable="true"] { cursor: text !important; }
 body.has-reticle-cursor select { cursor: default !important; }
 
 @media (max-width: 767px) {
   .cosmic-vignette { background: radial-gradient(ellipse 100% 68% at 50% 54%, transparent 30%, rgba(3, 4, 10, 0.82) 100%); }
   .cinematic-dock { bottom: 8px; width: calc(100% - 16px); max-height: min(27svh, 120px); border-radius: 13px; }
-  .cinematic-dock.dock-expanded { max-height: min(48svh, 420px); }
+  .cinematic-dock.dock-expanded { max-height: min(34svh, 320px); }
   .cosmic-primary, .cosmic-quiet { min-height: 44px; font-size: 11px; }
   .cosmic-input { min-height: 44px; font-size: 13px; }
   .memory-inspection-card { max-height: min(34svh, 300px); }
