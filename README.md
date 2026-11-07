@@ -276,8 +276,8 @@ scoring; the AI checks it and writes the explanation. If every AI provider is do
 
 1. **Read the evidence.** Logs are normalised from JSON, logfmt, nginx/access logs, Docker output, syslog and
    plain text, including multi-line Java, Python, Node and Go stack traces. The engine finds the "origin frame",
-   the first line of your own code in the trace.
-2. **Match known failures.** 59 failure signatures (32 core plus 5 domain packs) are matched. Each one is tagged as
+   the first line of your own code in the trace. Written incident reports (prose) are read too; see Incident packs.
+2. **Match known failures.** 88 failure signatures (32 core plus 9 domain packs) are matched. Each one is tagged as
    an origin, mechanism, contributor, symptom or change.
 3. **Flag anomalies, with the reason.** It flags the incident onset, error spikes against a baseline (robust
    z-score), saturated resources (for example `40/40 connections, 212 waiting`), restart loops and new error types.
@@ -409,6 +409,24 @@ The pipeline is domain-neutral; packs add patterns and playbooks for other kinds
 | `kubernetes` | Image pull failure, unschedulable pods, node NotReady, evictions, quota exceeded |
 | `data_pipeline` | Consumer lag, schema drift, failed or late jobs, data-quality failures |
 | `industrial` | Overheating, vibration and bearings, pressure excursions, sensor dropout, PLC faults, power events, trips |
+| `healthcare` | EHR / clinical system downtime, dispensing cabinets, medical device faults, cold chain, lab interfaces, patient ID (operational guidance only, never clinical) |
+| `logistics` | Baggage and sortation jams, worn parts, warehouse / dispatch / check-in outages, crew scheduling, fleet tracking, reefer temperature, backlogs and delays |
+| `support` | Ticket surges, SLA breaches, complaint clusters, the product defect behind them, helpdesk / phone / chat outages |
+| `safety` | Defeated safety devices, missing segregation, ignored near misses, vehicle-pedestrian collisions, slips and falls, spills, lockout, PPE, injuries |
+
+**Written reports.** Hospitals, airlines, warehouses, support desks and safety teams usually describe incidents in
+prose, not log lines. `reports.py` recognises a written report (few log-shaped lines, report headings or full
+sentences) and turns it into events:
+- the date comes from the header ("Date: 7 November 2026") or the incident's creation time;
+- times are read from sentences ("At 02:10 …", "2:15 pm"), including a report that crosses midnight;
+- sections ("Summary", "Timeline", "Actions taken", "Impact", "Contributing factors") are kept on each event;
+- severity comes only from explicit wording ("fractured ankle" is critical, "stopped sorting" an error, "delayed" a
+  warning), and negations don't count ("no patient harm was identified").
+
+What people did ("Actions taken") is context, not a new failure, and its clock times aren't treated as failure times.
+When the report says fixing something restored service ("a worn drive belt was replaced and sorting resumed"), that
+cause gets a visible scoring bonus. Plans in these fields talk about harm, delays and safe return to use instead of
+error rates. Paste the report into an incident's logs field; nothing else changes.
 
 To add a pack, create a module in `aftermath_intelligence/packs/` that defines `PACK = Pack(...)` with
 `Signature`s (patterns, checks, mitigations, fixes, avoid, causes), register it in `packs/__init__.py`, and add
@@ -442,13 +460,14 @@ scenarios to `data/eval_scenarios.json`.
 ### Tests and evaluation
 
 ```bash
-pytest                                      # 268 tests, no network or keys needed
-python scripts/evaluate_intelligence.py     # 25 scenarios across 6 fields
+pytest                                      # 295 tests, no network or keys needed
+python scripts/evaluate_intelligence.py     # 29 scenarios across 10 fields
 python scripts/check_providers.py [groq]    # live provider smoke test
 AFTERMATH_LIVE_TESTS=1 pytest tests/test_live_providers.py
 ```
 
-Current evaluation: 25/25 correct root causes, 25/25 categories, 17/17 symptoms, 0 unsafe steps. Scenarios can
+Current evaluation: 29/29 correct root causes, 29/29 categories, 23/23 symptoms, 0 unsafe steps (including four
+written reports: hospital EHR downtime, airline baggage, support surge, warehouse forklift). Scenarios can
 also check the stack frame the plan must name (Java, Python, Go and Node traces are covered), the detected release,
 text that must never appear (a planted `curl … | sh` fix, a stale release number) and steps that must appear. CI
 (`.github/workflows/ci.yml`) runs lint, tests and this evaluation on every PR, and fails if accuracy drops or any

@@ -449,6 +449,91 @@
     ],
     "must_not_recommend": []
    }
+  },
+  {
+   "id": "report-hospital-ehr",
+   "title": "Ward 4B: EHR unavailable, medication rounds delayed",
+   "service": "ward-4b",
+   "severity": "SEV1",
+   "alert_text": "EHR unavailable on Ward 4B and ED workstations",
+   "logs": "Incident report: Ward 4B medication administration delays\nDate: 7 November 2026\nReported by: Charge nurse, night shift\n\nSummary\nAt 02:10 the electronic health record became unavailable on all ward workstations. Nurses could not open the medication administration record, so the 02:00 and 03:00 medication rounds were delayed.\n\nTimeline\n02:05 - Clinical staff reported the EHR was very slow to load patient charts.\n02:10 - EHR login screen showed \"service unavailable\" on every workstation in Ward 4B and the ED.\n02:20 - IT service desk confirmed a database server for the EHR had stopped responding after a scheduled patch at 02:00.\n02:25 - The automated dispensing cabinet could not verify orders and went into override-only mode.\n03:40 - EHR restored after IT rolled back the patch.\n\nActions taken\nStaff switched to paper downtime forms at 02:30. Restarting the ward workstations did not help.\n\nImpact\nFourteen medication doses were given late; no patient harm was identified.\n",
+   "expected": {
+    "root_signature": "ehr_downtime",
+    "category": "healthcare_operations",
+    "must_not_recommend": [],
+    "symptoms": [
+     "medication_delay"
+    ],
+    "must_not_mention": [
+     "error rate and latency",
+     "user-facing errors"
+    ]
+   }
+  },
+  {
+   "id": "report-airline-baggage",
+   "title": "Terminal 2 baggage system stopped sorting",
+   "service": "t2-baggage",
+   "severity": "SEV2",
+   "alert_text": "Baggage sortation stopped at Terminal 2; departures delayed",
+   "logs": "Operations incident report - Hub ground operations\nDate: 7 November 2026\n\nSummary\nBetween 06:15 and 08:40 the baggage handling system at Terminal 2 stopped sorting bags. 23 departures were delayed and 410 bags missed their connecting flights.\n\nWhat happened\nAt 06:15 the baggage sortation system reported a conveyor jam on sorter line 3. At 06:22 the sorter controller went into fault mode and all inbound bags were routed to the manual encoding area. Ground staff began hand-sorting bags at 06:40, but the backlog grew to 1,900 bags by 07:30. Flight departures were delayed while bags were loaded by hand.\n\nActions taken\nMaintenance cleared the jam at 07:05 but the sorter faulted again within ten minutes. Rebooting the sorter controller did not resolve it. A worn drive belt on line 3 was replaced at 08:20 and sorting resumed at 08:40.\n",
+   "expected": {
+    "root_signature": "mechanical_wear",
+    "category": "logistics_operations",
+    "must_not_recommend": [],
+    "symptoms": [
+     "departure_delays",
+     "operations_backlog"
+    ],
+    "must_not_mention": [
+     "error rate and latency",
+     "user-facing errors"
+    ]
+   }
+  },
+  {
+   "id": "report-support-surge",
+   "title": "Support: ticket surge about duplicate charges",
+   "service": "support-desk",
+   "severity": "SEV2",
+   "alert_text": "Ticket volume 6x normal; first-response SLA breached",
+   "logs": "Customer support incident summary\nDate: 7 November 2026, prepared by the support operations lead\n\nBetween 09:00 and 13:00 we received 2,340 tickets, about six times the normal volume. Most customers reported that they were charged twice for the same order. The first-response SLA was breached for 61% of tickets and the average wait time in live chat rose to 47 minutes.\n\nAt 09:20 agents noticed that many tickets described the same duplicate charge. At 10:05 the payments team confirmed a retry bug in the checkout service was submitting payments twice. Agents were given a macro and refunds were issued in bulk from 12:30. Adding more agents to the queue did not reduce the backlog until the bug was fixed.\n",
+   "expected": {
+    "root_signature": "product_defect",
+    "category": "customer_support",
+    "must_not_recommend": [],
+    "symptoms": [
+     "sla_breach",
+     "ticket_surge"
+    ],
+    "must_not_mention": [
+     "error rate and latency",
+     "user-facing errors"
+    ]
+   }
+  },
+  {
+   "id": "report-safety-forklift",
+   "title": "DC-B aisle 14: forklift struck pedestrian",
+   "service": "dc-b",
+   "severity": "SEV1",
+   "alert_text": "Forklift struck a pedestrian worker; worker hospitalised",
+   "logs": "Workplace safety incident report\nSite: Distribution centre B, aisle 14\nDate: 7 November 2026, 14:35\n\nDescription\nA forklift reversing out of aisle 14 struck a pedestrian worker who was walking in the marked forklift lane. The worker suffered a fractured ankle and was taken to hospital. The forklift reversing alarm was found to be disconnected, and the aisle had no physical barrier between the pedestrian walkway and the forklift lane.\n\nImmediate actions\nThe area was cordoned off and the forklift was taken out of service. The operator was stood down pending investigation.\n\nContributing factors\nThe pedestrian walkway was blocked by pallets, so workers were using the forklift lane. A near miss in the same aisle was reported two weeks earlier but no action was recorded.\n",
+   "expected": {
+    "root_signature": "safety_device_defeated",
+    "also_accept": [
+     "segregation_failure"
+    ],
+    "category": "workplace_safety",
+    "must_not_recommend": [],
+    "symptoms": [
+     "injury"
+    ],
+    "must_not_mention": [
+     "error rate and latency",
+     "user-facing errors"
+    ]
+   }
   }
  ]
 }
