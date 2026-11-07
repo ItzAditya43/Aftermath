@@ -8,10 +8,11 @@ Selected when AGENT_MODE=real. Flow for `analyze`:
   3. Stream MemoryEvents, then a narrative (LLM-streamed, or deterministic if no provider answers),
      then exactly one SuggestionEvent.
 
-Memory: `FileMemory` (JSON lines at AFTERMATH_MEMORY_PATH, default .aftermath/memory.jsonl) so lessons
-survive restarts; set AFTERMATH_MEMORY_PATH="" for process-only memory. Both implement
-`aftermath_intelligence.memory.IncidentMemory`, so the Hindsight adapter can be passed as `memory=`
-without touching this file. Reports never claim Hindsight was used (`memory_backend` says what was).
+Memory: Hindsight when HINDSIGHT_API_KEY (Cloud) or HINDSIGHT_BASE_URL (self-hosted) is set
+(`app.agent.hindsight_memory`); otherwise `FileMemory` (JSON lines at AFTERMATH_MEMORY_PATH, default
+.aftermath/memory.jsonl), or process-only memory when that is "". All implement
+`aftermath_intelligence.memory.IncidentMemory`. Reports say which memory answered (`memory_backend`), including
+the local fallback when Hindsight is unreachable.
 
 Calibration: graded predictions persist at AFTERMATH_CALIBRATION_PATH. After AFTERMATH_CALIBRATION_MIN_SAMPLES
 (default 30) graded outcomes the suggestion confidence becomes an isotonic-calibrated probability instead of a
@@ -46,6 +47,7 @@ from aftermath_intelligence.prompts import NARRATIVE_SYSTEM, narrative_prompt
 from aftermath_intelligence.resolution import ResolutionStatus
 from aftermath_intelligence.store import FileMemory, PersistentCalibration, ReportStore
 from aftermath_intelligence.tools import ToolAdapter
+from app.agent.hindsight_memory import hindsight_from_settings
 from app.agent.interface import AgentEvent, IncidentContext, MemoryEvent, ResolutionContext, SuggestionEvent, TokenEvent
 from app.config import Settings
 
@@ -64,7 +66,15 @@ class RealAgent:
             router = LLMRouter(llm_settings)
         self.router = router
         memory_path = os.getenv("AFTERMATH_MEMORY_PATH", ".aftermath/memory.jsonl")
-        self.memory: IncidentMemory = memory or (FileMemory(memory_path) if memory_path else InProcessMemory())
+        if memory is None:
+            local = FileMemory(memory_path) if memory_path else InProcessMemory()
+            # Hindsight, when configured, recalls and retains; the local store keeps the structured records.
+            state = str(Path(memory_path).parent / "hindsight_state.json") if memory_path else None
+            hindsight = hindsight_from_settings(settings.hindsight_api_key, settings.hindsight_base_url,
+                                                settings.hindsight_bank_id, local, state)
+            # Explicit None check: an empty memory has len() == 0, so `hindsight or local` would drop it.
+            memory = hindsight if hindsight is not None else local
+        self.memory: IncidentMemory = memory
         self.connectors = connectors_from_env() if tools is None else Connectors(registry=None)
         tools = tools if tools is not None else self.connectors.registry
         self.limits = limits or InvestigationLimits(
@@ -261,6 +271,9 @@ class RealAgent:
     async def aclose(self) -> None:
         await self.connectors.aclose()
         await self.router.aclose()
+        close_memory = getattr(self.memory, "aclose", None)
+        if callable(close_memory):
+            await close_memory()
 
     # ------------------------------------------------------------------ helpers
 

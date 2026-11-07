@@ -6,3 +6,4 @@ sqlmodel>=0.0.22
 sse-starlette>=2.1
 httpx>=0.27
 pytest>=8
+hindsight-client>=1.2,<2
