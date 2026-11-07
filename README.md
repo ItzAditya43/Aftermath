@@ -55,6 +55,10 @@ curl localhost:8000/stats                              # time-to-resolve droppin
 
 `POST /admin/reset` wipes everything so you can run the demo again.
 
+The admin routes are protected. With `ADMIN_API_KEY` set, send it as `X-Admin-Key: <key>`; otherwise they return
+`401`. With no key set, they only accept requests from localhost (`403` otherwise), so the commands above work on
+your machine and nobody else on the network can wipe the demo.
+
 ### Endpoints
 
 | Method | Path | Body / query | Returns |
@@ -68,6 +72,8 @@ curl localhost:8000/stats                              # time-to-resolve droppin
 | `GET` | `/stats` | | totals, `avg_ttr_with_memory` vs `avg_ttr_without_memory`, monthly `ttr_over_time`, per-incident `resolutions` |
 | `POST` | `/admin/seed` | `?rebase_dates=true` | `{seeded, skipped, ingested}` (idempotent) |
 | `POST` | `/admin/reset` | | `{deleted: {...}}` |
+
+Both `/admin` routes need `X-Admin-Key` when `ADMIN_API_KEY` is set (`401` otherwise), or a localhost caller when it isn't (`403`).
 | `GET` | `/health` | | `{status, agent_mode, agent, database}` |
 
 Field values:
@@ -181,6 +187,7 @@ calibrated suggestion and "uncalibrated ranking score 0.86" otherwise.
 | `FRONTEND_ORIGIN` | `http://localhost:3000` | CORS allowlist, comma-separated |
 | `AUTO_SEED` | `false` | seed on startup if the DB is empty |
 | `MOCK_TOKEN_DELAY_MS` | `30` | typing speed of the mock agent's stream |
+| `ADMIN_API_KEY` | empty | required as `X-Admin-Key` on `/admin/*`; when empty, admin routes accept localhost only |
 
 `.env` is gitignored. Never commit real keys.
 
@@ -220,7 +227,8 @@ stats, and the mock agent's recall. It runs against a temporary SQLite file with
 
 `render.yaml` defines one free web service. To deploy:
 1. In Render, choose **New → Blueprint** and pick this repo.
-2. Set `FRONTEND_ORIGIN` (and the agent keys, once the real agent is in use).
+2. Set `FRONTEND_ORIGIN` (and the agent keys, once the real agent is in use). Render generates `ADMIN_API_KEY`;
+   copy it from the dashboard to call `/admin/*` with `X-Admin-Key`.
 3. Check that `GET /health` returns `{"status": "ok"}`.
 
 The free plan's disk is ephemeral, so SQLite is wiped whenever the service restarts or spins down

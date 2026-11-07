@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 _CODES_BY_STATUS = {
     400: "bad_request",
+    401: "unauthorized",
+    403: "forbidden",
     404: "not_found",
     405: "method_not_allowed",
     409: "conflict",
