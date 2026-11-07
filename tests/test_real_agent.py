@@ -194,3 +194,21 @@ def test_real_agent_memory_and_calibration_survive_restart(real_settings, tmp_pa
     assert any(n == "memory" and d["past_incident_id"] == "INC-OLD" for n, d in events)
     suggestion = next(d for n, d in events if n == "suggestion")
     assert suggestion["confidence"] == second.calibration.calibrate(second.reports[incident["id"]].top_score)
+
+
+def test_real_agent_rebuilds_memory_from_the_database_on_startup(real_settings, tmp_path):
+    """#10: with the memory file gone (fresh machine / new container), startup reloads resolved incidents."""
+    first = RealAgent(real_settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""))
+    client, _ = _client(real_settings, first)
+    with client:
+        client.post("/admin/seed")
+    (tmp_path / "memory.jsonl").unlink()
+
+    fresh = RealAgent(real_settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""))
+    assert len(fresh.memory) == 0
+    client, _ = _client(real_settings, fresh)
+    with client:
+        assert len(fresh.memory) == 20
+        incident = client.post("/incidents", json=ALERT).json()
+        events = _analyze(client, incident["id"])
+    assert {d["past_incident_id"] for n, d in events if n == "memory"} & {"INC-1001", "INC-1009", "INC-1017"}
