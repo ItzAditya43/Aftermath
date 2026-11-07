@@ -163,7 +163,7 @@ class RealAgent:
         engine = InvestigationEngine(memory=earlier, limits=InvestigationLimits(max_llm_calls=0,
                                                                                  max_seconds=self.limits.max_seconds))
         graded = 0
-        for incident, record in zip(incidents, records):
+        for incident, record in zip(incidents, records, strict=True):
             if incident.id not in self.calibration:
                 try:
                     report = await engine.run(_case(incident))
