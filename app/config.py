@@ -14,7 +14,10 @@ class Settings(BaseSettings):
 
     # Used only by the real agent.
     groq_api_key: str = ""
+    # Hindsight agent memory (real agent). Set HINDSIGHT_API_KEY for Hindsight Cloud, or HINDSIGHT_BASE_URL for a
+    # self-hosted server (e.g. http://localhost:8888, no key needed). Neither set = local file memory.
     hindsight_api_key: str = ""
+    hindsight_base_url: str = ""
     hindsight_bank_id: str = "aftermath-incidents"
 
     database_url: str = "sqlite:///./aftermath.db"

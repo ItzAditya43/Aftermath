@@ -185,7 +185,9 @@ calibrated suggestion and "uncalibrated ranking score 0.86" otherwise.
 |---|---|---|
 | `AGENT_MODE` | `mock` | `mock` or `real` |
 | `GROQ_API_KEY`, `GEMINI_API_KEY` | empty | real agent; all other engine settings are listed under [Intelligence engine](#configuration-1) |
-| `HINDSIGHT_API_KEY`, `HINDSIGHT_BANK_ID` | empty, `aftermath-incidents` | reserved for the Hindsight memory adapter (not built yet) |
+| `HINDSIGHT_API_KEY` | empty | Hindsight Cloud key: with `AGENT_MODE=real`, incident memory lives in Hindsight (see [Hindsight memory](#hindsight-memory)) |
+| `HINDSIGHT_BASE_URL` | empty | self-hosted Hindsight, e.g. `http://localhost:8888` (no key needed). Empty + key = Hindsight Cloud |
+| `HINDSIGHT_BANK_ID` | `aftermath-incidents` | the Hindsight memory bank (created automatically) |
 | `DATABASE_URL` | `sqlite:///./aftermath.db` | any SQLAlchemy URL (`postgres://` is accepted too) |
 | `FRONTEND_ORIGIN` | `http://localhost:3000` | CORS allowlist, comma-separated |
 | `AUTO_SEED` | `false` | seed on startup if the DB is empty |
@@ -361,6 +363,26 @@ warning and falls back to the default instead of stopping the server.
 - **Router behaviour.** Bounded retries, a circuit breaker, a per-investigation call budget, structured JSON output
   with one repair turn, and streaming that can fail over only before the first token.
 
+### Hindsight memory
+
+[Hindsight](https://github.com/vectorize-io/hindsight) is the agent's long-term memory when it is configured
+(`app/agent/hindsight_memory.py`, the `IncidentMemory` protocol from `memory.py`).
+
+- **Setup.** Hindsight Cloud: sign up at https://ui.hindsight.vectorize.io, create an API key, set
+  `HINDSIGHT_API_KEY` and `AGENT_MODE=real`. Self-hosted: run the Hindsight Docker image and set
+  `HINDSIGHT_BASE_URL=http://localhost:8888`. The bank (`HINDSIGHT_BANK_ID`) is created on first use.
+- **Retain.** Each resolved incident is written to Hindsight as natural language (root cause, the fix that worked,
+  the fixes that didn't) with `document_id` = the incident id, so a changed resolution replaces the old one. Live
+  resolutions are written synchronously so the next analysis can recall them; seeded history is sent in the
+  background. The structured record also stays in the local store, because the engine needs the exact fields.
+- **Recall.** Hindsight searches the bank; its facts are mapped back to incidents by `document_id`, in Hindsight's
+  order. Hindsight always returns its best guesses, so an incident is kept only when the explainable scorer agrees
+  or Hindsight's semantic match is strong (0.75+). Each recalled incident carries the fact Hindsight matched.
+- **Credits.** Hindsight runs an LLM over every retain. `.aftermath/hindsight_state.json` remembers what was sent,
+  so restarts and re-seeding only send new or changed incidents. `POST /admin/reset` deletes the bank too.
+- **Outages.** If Hindsight is unreachable, recall falls back to local memory and the report's `memory_backend`
+  says `local_file (Hindsight unavailable)`; failed writes stay pending and are retried on the next write or start.
+
 ### Memory, learning and calibration
 
 - `FileMemory` stores one record per resolved incident in `.aftermath/memory.jsonl`. Writes are atomic and the
@@ -373,9 +395,8 @@ warning and falls back to the default instead of stopping the server.
 - **Full investigations** are saved per incident (`AFTERMATH_REPORTS_DIR`), so `GET /incidents/{id}/investigation`
   and grading at resolve time work after a restart. A saved report is only served for an incident created before
   it was produced, so ids reused by a fresh database never get another incident's report.
-- **Hindsight:** a Hindsight adapter only needs `recall(query)` and `retain(record)` (optionally `get(id)` and
-  `retain_many(records)`), the `IncidentMemory` protocol in `memory.py`. Pass it as `RealAgent(settings, memory=...)`.
-  It isn't built yet, and who builds it is still to be agreed.
+- **Hindsight:** with `HINDSIGHT_API_KEY` (or `HINDSIGHT_BASE_URL`) set, the real agent uses Hindsight for memory.
+  See [Hindsight memory](#hindsight-memory).
 - **Calibration:** each resolve grades the prediction (correct, partially correct, incorrect). Seeding also
   backtests history: each resolved incident is replayed, oldest first, against memory holding only the incidents
   before it, and the top hypothesis is graded against the confirmed root cause (deterministic, no AI calls; a
@@ -529,6 +550,5 @@ They are kept for compatibility; new work should use `investigation.py`.
 
 ### Not done yet
 
-- **Hindsight memory adapter.** The interface exists; `FileMemory` stands in until the adapter is built.
 - **Full-investigation UI.** The endpoint exists (#12); the screen is #20.
 - **Calibrated confidence.** It needs about 30 real resolved incidents before scores become probabilities.
