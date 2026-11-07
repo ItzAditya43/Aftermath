@@ -18,7 +18,9 @@ _CODES_BY_STATUS = {
     404: "not_found",
     405: "method_not_allowed",
     409: "conflict",
+    413: "payload_too_large",
     422: "validation_error",
+    429: "rate_limited",
     500: "internal_error",
     503: "unavailable",
 }
@@ -35,11 +37,12 @@ class ErrorResponse(BaseModel):
 
 
 class AppError(Exception):
-    def __init__(self, status_code: int, code: str, message: str):
+    def __init__(self, status_code: int, code: str, message: str, headers: dict[str, str] | None = None):
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.headers = headers
 
 
 class NotFoundError(AppError):
@@ -65,7 +68,10 @@ def error_responses(*status_codes: int) -> dict[int | str, dict[str, Any]]:
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error(_: Request, exc: AppError):
-        return error_json(exc.status_code, exc.code, exc.message)
+        response = error_json(exc.status_code, exc.code, exc.message)
+        if exc.headers:
+            response.headers.update(exc.headers)
+        return response
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(_: Request, exc: StarletteHTTPException):

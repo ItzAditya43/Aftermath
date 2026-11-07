@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlmodel import Session
 
 from app.models import Incident
@@ -197,3 +198,119 @@ def test_secrets_in_resolution_are_redacted_before_storage_and_memory(client, ap
 def test_ordinary_incident_text_is_unchanged_by_redaction(client, make_incident):
     incident = make_incident()
     assert (incident["title"], incident["alert_text"], incident["logs"]) == (ALERT["title"], ALERT["alert_text"], ALERT["logs"])
+
+
+# ---------------------------------------------------------------- concurrent creates (#31)
+
+def test_concurrent_creates_all_succeed_with_unique_ids(client):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def create(i):
+        return client.post("/incidents", json={**ALERT, "title": f"parallel incident {i}"})
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        responses = list(pool.map(create, range(20)))
+    assert [r.status_code for r in responses] == [201] * 20, [r.text for r in responses if r.status_code != 201][:2]
+    ids = [r.json()["id"] for r in responses]
+    assert len(set(ids)) == 20
+    assert len(client.get("/incidents").json()) == 20
+
+
+def test_create_retries_when_another_process_took_the_id(client, make_incident, monkeypatch):
+    from app import services
+
+    taken = make_incident()["id"]
+    real = services.next_incident_id
+    calls = []
+
+    def stale_then_real(session):
+        calls.append(1)
+        return taken if len(calls) == 1 else real(session)  # first pick collides, like a parallel worker
+
+    monkeypatch.setattr(services, "next_incident_id", stale_then_real)
+    response = client.post("/incidents", json=ALERT)
+    assert response.status_code == 201 and response.json()["id"] != taken
+    assert len(calls) == 2
+
+
+# ---------------------------------------------------------------- blank text and redaction growth (#33)
+
+@pytest.mark.parametrize("field, value", [("title", "   "), ("title", "  ab  "), ("alert_text", "  \n ")])
+def test_blank_or_whitespace_padded_text_is_rejected(client, field, value):
+    response = client.post("/incidents", json={**ALERT, field: value})
+    assert response.status_code == 422
+
+
+def test_title_and_alert_are_stored_trimmed(make_incident):
+    incident = make_incident(title="  payments-api errors  ", alert_text="\n 5xx spike \n")
+    assert incident["title"] == "payments-api errors" and incident["alert_text"] == "5xx spike"
+
+
+def test_redaction_never_pushes_a_title_past_its_limit(make_incident):
+    incident = make_incident(title=("token=a " * 25)[:199])
+    assert len(incident["title"]) <= 200
+    assert "token=a " not in incident["title"] and "[REDACTED]" in incident["title"]
+
+
+@pytest.mark.parametrize("payload", [
+    {"root_cause": "   ", "fix_that_worked": "Fixed it"},
+    {"root_cause": "Leak", "fix_that_worked": " \n "},
+    {"root_cause": "Leak", "fix_that_worked": "Fixed it", "what_failed": ["   "]},
+])
+def test_blank_resolution_fields_are_rejected(client, make_incident, payload):
+    incident = make_incident()
+    assert client.post(f"/incidents/{incident['id']}/resolve", json=payload).status_code == 422
+
+
+def test_redaction_never_pushes_resolution_fields_past_their_limits(client, make_incident):
+    incident = make_incident()
+    grown = ("token=a " * 700)[:4999]
+    response = client.post(f"/incidents/{incident['id']}/resolve", json={"root_cause": grown, "fix_that_worked": grown})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["root_cause"]) <= 5000 and len(body["resolution"]) <= 5000
+
+
+# ---------------------------------------------------------------- size limits (#32)
+
+def test_overlong_what_failed_item_is_rejected(client, make_incident):
+    incident = make_incident()
+    response = client.post(f"/incidents/{incident['id']}/resolve",
+                           json={"root_cause": "Leak", "fix_that_worked": "Fixed", "what_failed": ["x" * 200_000]})
+    assert response.status_code == 422
+
+
+def test_ten_megabyte_resolve_is_rejected_before_parsing(client, make_incident):
+    incident = make_incident()
+    response = client.post(f"/incidents/{incident['id']}/resolve",
+                           json={"root_cause": "Leak", "fix_that_worked": "Fixed", "what_failed": ["x" * 2_000_000] * 5})
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "payload_too_large"
+    assert client.get(f"/incidents/{incident['id']}").json()["status"] == "open"  # nothing was stored
+
+
+def test_huge_create_gets_413_not_422(client):
+    response = client.post("/incidents", json={**ALERT, "logs": "x" * 30_000_000})
+    assert response.status_code == 413
+
+
+def test_chunked_body_without_content_length_is_limited(client):
+    def chunks():
+        for _ in range(40):
+            yield b"x" * 65_536  # 2.5 MiB in total, streamed without Content-Length
+
+    response = client.post("/incidents", content=chunks(), headers={"Content-Type": "application/json"})
+    assert response.status_code == 413
+
+
+def test_largest_valid_incident_is_accepted(client):
+    escaped = "é\n" * 100_000  # 200k characters of logs that grow when JSON-escaped
+    response = client.post("/incidents", json={**ALERT, "logs": escaped})
+    assert response.status_code == 201
+
+
+def test_413_carries_cors_headers_for_the_frontend(client):
+    response = client.post("/incidents", json={**ALERT, "logs": "x" * 3_000_000},
+                           headers={"Origin": "http://localhost:3000"})
+    assert response.status_code == 413
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"

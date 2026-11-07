@@ -1,3 +1,4 @@
+import inspect
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request
@@ -5,7 +6,7 @@ from sqlmodel import col, select
 from sse_starlette.sse import EventSourceResponse
 
 from app import services
-from app.api.deps import AgentDep
+from app.api.deps import AgentDep, AnalyzeGuard, WriteGuard
 from app.db import SessionDep
 from app.errors import NotFoundError, error_responses
 from app.models import Incident, IncidentStatus, MemoryReference
@@ -36,7 +37,10 @@ SSE_EXAMPLE = (
 )
 
 
-@router.post("", response_model=IncidentDetail, status_code=201, responses=error_responses(422))
+@router.post(
+    "", response_model=IncidentDetail, status_code=201, dependencies=WriteGuard,
+    responses=error_responses(401, 413, 422, 429),
+)
 def create_incident(data: IncidentCreate, session: SessionDep) -> IncidentDetail:
     """Open a new incident from a production alert. Also records an `alert` timeline event."""
     incident = services.create_incident(session, data)
@@ -65,6 +69,7 @@ def get_incident(incident_id: str, session: SessionDep) -> IncidentDetail:
 @router.get(
     "/{incident_id}/analyze",
     response_class=EventSourceResponse,
+    dependencies=AnalyzeGuard,
     responses={
         200: {
             "description": (
@@ -74,7 +79,7 @@ def get_incident(incident_id: str, session: SessionDep) -> IncidentDetail:
             ),
             "content": {"text/event-stream": {"example": SSE_EXAMPLE}},
         },
-        **error_responses(404),
+        **error_responses(401, 404, 429),
     },
 )
 async def analyze_incident(incident_id: str, request: Request, session: SessionDep, agent: AgentDep):
@@ -88,7 +93,8 @@ async def analyze_incident(incident_id: str, request: Request, session: SessionD
 
 
 @router.post(
-    "/{incident_id}/resolve", response_model=ResolveResponse, responses=error_responses(404, 409, 422)
+    "/{incident_id}/resolve", response_model=ResolveResponse, dependencies=WriteGuard,
+    responses=error_responses(401, 404, 409, 413, 422, 429),
 )
 async def resolve_incident(
     incident_id: str, data: ResolveRequest, session: SessionDep, agent: AgentDep
@@ -121,9 +127,14 @@ def get_investigation(incident_id: str, session: SessionDep, agent: AgentDep) ->
     `404` if the incident doesn't exist, hasn't been analysed since the server started, or the agent
     (e.g. the mock) doesn't produce full investigations. Reports are kept for the last 200 analysed incidents.
     """
-    services.get_incident_or_404(session, incident_id)
+    incident = services.get_incident_or_404(session, incident_id)
     getter = getattr(agent, "investigation", None)
-    data = getter(incident_id) if callable(getter) else None
+    data = None
+    if callable(getter):
+        # Saved reports outlive the DB: ids restart at INC-1021 if it is recreated. Passing created_at lets the
+        # agent refuse an older incident's report for a reused id (agents without that parameter still work).
+        accepts_created_at = "created_at" in inspect.signature(getter).parameters
+        data = getter(incident_id, created_at=incident.created_at) if accepts_created_at else getter(incident_id)
     if data is None:
         raise NotFoundError(
             f"No investigation for {incident_id} yet. Run GET /incidents/{incident_id}/analyze first "

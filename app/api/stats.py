@@ -21,7 +21,14 @@ def _avg(values: list[int]) -> float | None:
 def get_stats(session: SessionDep) -> StatsOut:
     """Totals plus time-to-resolve over time, so the demo can show resolution time dropping as memory grows."""
     incidents = session.exec(select(Incident).order_by(col(Incident.created_at))).all()
-    assisted = set(session.exec(select(MemoryReference.incident_id).distinct()).all())
+    # "Memory-assisted" means memory was recalled while the incident was being worked, i.e. before it was resolved.
+    # Analysing an incident after resolving it must not move it into the with-memory group.
+    resolved_at = {i.id: i.resolved_at for i in incidents}
+    assisted = {
+        incident_id
+        for incident_id, used_at in session.exec(select(MemoryReference.incident_id, MemoryReference.used_at)).all()
+        if resolved_at.get(incident_id) is None or used_at <= resolved_at[incident_id]
+    }
 
     status_counts = Counter(i.status for i in incidents)
     resolved = sorted(

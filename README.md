@@ -84,7 +84,7 @@ Field values:
 - Incident IDs look like `INC-1021`. Seed incidents are `INC-1001` to `INC-1020`.
 - Timestamps are ISO-8601 UTC (`...Z`).
 
-**Errors** always have this shape, with status `404`, `409`, `422` or `500`:
+**Errors** always have this shape, with status `401`, `403`, `404`, `409`, `413`, `422`, `429` or `500`:
 
 ```json
 {"error": {"code": "not_found", "message": "Incident INC-9999 not found"}}
@@ -101,12 +101,14 @@ On `422`, the error also includes `details: [{loc, msg, type}]`.
 |---|---|---|
 | `memory` | 0–3 times, first | `{past_incident_id, title, service, summary, relevance_score, root_cause, resolution, failed_attempts[], time_to_resolve_minutes}` |
 | `token` | many | `{text}`: append these to show the explanation typing out |
-| `suggestion` | once | `{likely_root_cause, steps[], warnings[], confidence, based_on[]}` |
+| `suggestion` | once | `{likely_root_cause, steps[], warnings[], warning_details[{text, kind}], confidence, confidence_calibrated, based_on[], origin_frame}` |
 | `done` | last | `{incident_id, memories_used}` |
 | `error` | instead of `done` if the agent fails | `{code, message}` |
 
 The backend saves each recalled memory (`GET /memories`), the suggestion (`last_suggestion` on the
-incident), and two `analysis` timeline events. Running the analysis again replaces the earlier memories.
+incident), and two `analysis` timeline events. Running the analysis again replaces the earlier memories, except on a
+resolved incident: its memories stay as they were while it was worked, so `/stats` only counts memory used before
+resolving as "memory-assisted".
 
 ### Frontend: consuming the stream (for Shashank)
 
@@ -189,6 +191,10 @@ calibrated suggestion and "uncalibrated ranking score 0.86" otherwise.
 | `AUTO_SEED` | `false` | seed on startup if the DB is empty |
 | `MOCK_TOKEN_DELAY_MS` | `30` | typing speed of the mock agent's stream |
 | `ADMIN_API_KEY` | empty | required as `X-Admin-Key` on `/admin/*`; when empty, admin routes accept localhost only |
+| `MAX_REQUEST_BYTES` | `2097152` (2 MiB) | larger request bodies get `413` before they are parsed |
+| `ANALYZE_RATE_LIMIT_PER_MINUTE` | `10` | analyses per client per minute (`429` + `Retry-After` above it; `0` = off) |
+| `WRITE_RATE_LIMIT_PER_MINUTE` | `30` | creates + resolves per client per minute (`0` = off) |
+| `API_KEY` | empty | when set, create / analyze / resolve need `X-API-Key`. For private or API-only deployments: a key built into a public browser app isn't secret, so a public demo relies on the rate limits |
 
 `.env` is gitignored. Never commit real keys.
 

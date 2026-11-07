@@ -10,6 +10,8 @@ from app.api import admin, incidents, stats
 from app.config import Settings, get_settings
 from app.db import init_db, make_engine
 from app.errors import register_error_handlers
+from app.limits import BodySizeLimitMiddleware
+from app.ratelimit import RateLimiter
 from app.models import Incident
 from app.seeding import seed_database, warm_agent_from_db
 
@@ -59,7 +61,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.agent = agent
+    app.state.rate_limiters = {
+        "analyze": RateLimiter(settings.analyze_rate_limit_per_minute),
+        "write": RateLimiter(settings.write_rate_limit_per_minute),
+    }
 
+    # Added before CORS so CORS wraps it and a 413 still carries the CORS headers the browser needs.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

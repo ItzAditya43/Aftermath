@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from app.agent.real_agent import RealAgent
 from app.config import Settings
 from app.main import create_app
-from tests.conftest import ALERT, parse_sse
+from tests.conftest import ALERT, LOCAL_CLIENT, parse_sse
 from tests.llm_fakes import Recorder, groq_reply, groq_stream, router
 
 
@@ -27,7 +27,7 @@ def real_settings(tmp_path) -> Settings:
 def _client(settings: Settings, agent: RealAgent):
     app = create_app(settings)
     app.state.agent = agent
-    return TestClient(app), app
+    return TestClient(app, client=LOCAL_CLIENT), app
 
 
 def _analyze(client, incident_id):

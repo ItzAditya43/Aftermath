@@ -411,13 +411,18 @@ def test_structured_extras_reach_the_stream_only_when_the_contract_has_them(tmp_
             return [e async for e in agent.analyze(incident)]
         return run(drain())[-1]
 
-    plain = last(real_agent.RealAgent(settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""), stream_narrative=False))
-    assert isinstance(plain, SuggestionEvent) and not hasattr(plain, "warning_details")
-
-    Extended = create_model("Extended", __base__=SuggestionEvent, warning_details=(list, []), origin_frame=(str | None, None))
-    monkeypatch.setattr(real_agent, "SuggestionEvent", Extended)
+    # The backend contract declares both extras (issue #36), so they reach the stream.
     rich = last(real_agent.RealAgent(settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""), stream_narrative=False))
-    assert rich.origin_frame.startswith("ChargebackSyncJob.sync") and rich.warning_details[0]["kind"] == "severity"
+    assert isinstance(rich, SuggestionEvent)
+    assert rich.origin_frame.startswith("ChargebackSyncJob.sync") and rich.warning_details[0].kind == "severity"
+
+    # An older contract without them still works: the extras are dropped instead of failing validation.
+    Plain = create_model("Plain", type=(str, "suggestion"), likely_root_cause=(str, ...), steps=(list[str], []),
+                         warnings=(list[str], []), confidence=(float, ...), confidence_calibrated=(bool, False),
+                         based_on=(list[str], []))
+    monkeypatch.setattr(real_agent, "SuggestionEvent", Plain)
+    plain = last(real_agent.RealAgent(settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""), stream_narrative=False))
+    assert isinstance(plain, Plain) and not hasattr(plain, "warning_details") and not hasattr(plain, "origin_frame")
 
 
 def test_bad_numeric_settings_fall_back_instead_of_crashing(monkeypatch, caplog):

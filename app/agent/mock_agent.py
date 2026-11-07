@@ -18,6 +18,7 @@ from app.agent.interface import (
     ResolutionContext,
     SuggestionEvent,
     TokenEvent,
+    WarningDetail,
 )
 
 # label -> (human description, regexes). Matched against title + alert + logs (lowercased).
@@ -280,7 +281,8 @@ class MockAgent:
                     else "Unknown: no past incident matches and no known error signature in the logs."
                 ),
                 steps=steps,
-                warnings=["No similar incident in memory; verify each step before acting."],
+                warnings=[NO_MATCH_WARNING],
+                warning_details=[WarningDetail(text=NO_MATCH_WARNING, kind="memory")],
                 confidence=0.35 if current.signatures else 0.2,
                 based_on=[],
             )
@@ -294,10 +296,11 @@ class MockAgent:
         steps += _split_steps(past.resolution or "")
         steps.append("Watch error rate and latency for 15 minutes before resolving")
 
-        warnings = [f"Avoid: {_clean(a)}. It did not work in {m.entry.incident.id}"
-                    for m in matches for a in m.entry.incident.failed_attempts][:4]
+        details = [WarningDetail(text=f"{_clean(a)} did not work in {m.entry.incident.id}", kind="history")
+                   for m in matches for a in m.entry.incident.failed_attempts][:4]
         if incident.severity == "SEV1":
-            warnings.append("SEV1: post a status update before applying changes")
+            details.append(WarningDetail(text="SEV1: post a status update before applying changes", kind="severity"))
+        warnings = [d.text for d in details]
 
         confidence = min(0.95, 0.4 + 0.5 * best.score + 0.05 * (len(matches) - 1))
         return SuggestionEvent(
@@ -306,6 +309,7 @@ class MockAgent:
             likely_root_cause=_clean(past.root_cause),
             steps=steps,
             warnings=warnings,
+            warning_details=details,
             confidence=round(confidence, 2),
             # The mock has no graded history, so its confidence is a ranking score, never a calibrated
             # probability. For calibrated confidence (and the UI's consensus state) use AGENT_MODE=real:
@@ -317,6 +321,9 @@ class MockAgent:
     async def _sleep(self, units: int) -> None:
         if self.token_delay:
             await asyncio.sleep(self.token_delay * units)
+
+
+NO_MATCH_WARNING = "No similar incident in memory; verify each step before acting."
 
 
 def _clean(text: str | None) -> str:

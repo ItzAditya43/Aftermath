@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from tests.conftest import LOCAL_CLIENT
 
 
 def test_seed_loads_20_incidents(client, seeded):
@@ -129,12 +130,12 @@ def test_auto_seed_on_startup_and_mock_memory_survives_restart(settings):
     from app.main import create_app
 
     auto = settings.model_copy(update={"auto_seed": True})
-    with TestClient(create_app(auto)) as c:
+    with TestClient(create_app(auto), client=LOCAL_CLIENT) as c:
         assert len(c.get("/incidents").json()) == 20
 
     # A fresh process (new app, same DB): the mock agent's memory is rebuilt from resolved incidents.
     restarted = create_app(auto)
-    with TestClient(restarted) as c:
+    with TestClient(restarted, client=LOCAL_CLIENT) as c:
         assert len(c.get("/incidents").json()) == 20  # not seeded twice
         assert len(restarted.state.agent.memory) == 20
 
@@ -145,7 +146,7 @@ def test_auto_seed_on_startup_and_mock_memory_survives_restart(settings):
 @pytest.fixture
 def keyed_client(settings):
     app = create_app(settings.model_copy(update={"admin_api_key": "s3cret-admin-key"}))
-    with TestClient(app) as c:
+    with TestClient(app, client=LOCAL_CLIENT) as c:
         yield c
 
 
@@ -181,3 +182,59 @@ def test_without_a_key_admin_routes_refuse_non_local_callers(settings, path):
 def test_without_a_key_admin_routes_work_from_localhost(settings):
     with TestClient(create_app(settings), client=("127.0.0.1", 50000)) as local:
         assert local.post("/admin/seed").status_code == 200
+
+
+def test_testclient_host_is_not_treated_as_localhost(settings):
+    """#38: the test framework's placeholder host must not pass the localhost check."""
+    with TestClient(create_app(settings)) as default:  # reports its host as "testclient"
+        assert default.post("/admin/reset").status_code == 403
+
+
+# ---------------------------------------------------------------- memory-assisted means "before resolving" (#34)
+
+RESOLUTION = {"root_cause": "Leak in RefundService", "fix_that_worked": "Fixed the leak"}
+
+
+def _assisted(client, incident_id):
+    return next(r["memory_assisted"] for r in client.get("/stats").json()["resolutions"] if r["id"] == incident_id)
+
+
+def test_analysing_after_resolving_does_not_make_an_incident_memory_assisted(client, seeded, make_incident, analyze):
+    incident = make_incident()
+    client.post(f"/incidents/{incident['id']}/resolve", json=RESOLUTION)
+    assert _assisted(client, incident["id"]) is False
+    events = analyze(incident["id"])
+    assert any(name == "memory" for name, _ in events)  # the re-analysis still streams recalled memories
+    assert _assisted(client, incident["id"]) is False
+    assert client.get(f"/incidents/{incident['id']}/memories").json() == []
+
+
+def test_reanalysing_a_resolved_incident_keeps_it_memory_assisted(client, seeded, make_incident, analyze):
+    incident = make_incident()
+    analyze(incident["id"])
+    used_before = client.get(f"/incidents/{incident['id']}/memories").json()
+    client.post(f"/incidents/{incident['id']}/resolve", json=RESOLUTION)
+    assert _assisted(client, incident["id"]) is True
+    analyze(incident["id"])
+    assert _assisted(client, incident["id"]) is True
+    assert client.get(f"/incidents/{incident['id']}/memories").json() == used_before
+    detail = client.get(f"/incidents/{incident['id']}").json()
+    assert detail["status"] == "resolved" and detail["last_suggestion"] is not None
+
+
+def test_memory_recorded_after_resolution_is_not_counted(client, app, seeded, make_incident):
+    """Rows written by older versions (re-analysis after resolve) are excluded too."""
+    from datetime import timedelta
+
+    from sqlmodel import Session
+
+    from app.models import Incident, MemoryReference
+
+    incident = make_incident()
+    client.post(f"/incidents/{incident['id']}/resolve", json=RESOLUTION)
+    with Session(app.state.engine) as session:
+        resolved_at = session.get(Incident, incident["id"]).resolved_at
+        session.add(MemoryReference(incident_id=incident["id"], past_incident_id="INC-1017", summary="later",
+                                    relevance_score=0.9, used_at=resolved_at + timedelta(minutes=5)))
+        session.commit()
+    assert _assisted(client, incident["id"]) is False

@@ -6,6 +6,9 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 
+# TestClient reports its host as "testclient"; connect as localhost like a real local caller would.
+LOCAL_CLIENT = ("127.0.0.1", 50000)
+
 ALERT = {
     "title": "payments-api: connection pool exhausted, charges failing",
     "service": "payments-api",
@@ -38,7 +41,7 @@ def app(settings):
 
 @pytest.fixture
 def client(app):
-    with TestClient(app) as c:
+    with TestClient(app, client=LOCAL_CLIENT) as c:
         yield c
 
 

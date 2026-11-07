@@ -87,7 +87,7 @@ def test_learning_loop_resolved_incident_is_recalled_next_time(client, make_inci
     events = analyze(second["id"])
     memory_ids = [d["past_incident_id"] for n, d in events if n == "memory"]
     assert memory_ids == [first["id"]]
-    assert "Avoid: Restarted pods" in events[-2][1]["warnings"][0]
+    assert events[-2][1]["warnings"][0].startswith("Restarted pods did not work in INC-")
 
 
 def test_analyze_unknown_incident_404_json(client):
@@ -161,3 +161,59 @@ def test_investigation_endpoint_is_404_for_the_mock_agent(client, seeded, make_i
     response = client.get(f"/incidents/{incident['id']}/investigation")
     assert response.status_code == 404
     assert "AGENT_MODE=real" in response.json()["error"]["message"]
+
+
+# ---------------------------------------------------------------- structured extras in the contract (#36)
+
+def test_suggestion_carries_warning_details_in_the_same_order_as_warnings(client, seeded, make_incident, analyze):
+    incident = make_incident()  # SEV1 payments alert: history warnings plus the SEV1 status-update warning
+    suggestion = next(d for n, d in analyze(incident["id"]) if n == "suggestion")
+    details = suggestion["warning_details"]
+    assert [d["text"] for d in details] == suggestion["warnings"]
+    assert {d["kind"] for d in details} <= {"history", "severity"} and details[-1]["kind"] == "severity"
+    assert "origin_frame" in suggestion
+    saved = client.get(f"/incidents/{incident['id']}").json()["last_suggestion"]
+    assert saved["warning_details"] == details
+
+
+def test_contract_accepts_engine_extras_and_unknown_warning_kinds():
+    from app.agent.interface import SuggestionEvent
+
+    event = SuggestionEvent(
+        likely_root_cause="Connection leak", confidence=0.7,
+        warnings=["SEV1: post a status update", "Something new"],
+        warning_details=[{"text": "SEV1: post a status update", "kind": "severity"},
+                         {"text": "Something new", "kind": "a_future_kind"}],
+        origin_frame="ChargebackSyncJob.sync (ChargebackSyncJob.java:92)",
+    )
+    assert event.warning_details[1].kind == "a_future_kind"
+    assert event.origin_frame.startswith("ChargebackSyncJob.sync")
+    old = SuggestionEvent(likely_root_cause="x", confidence=0.5)  # older agents / saved rows still validate
+    assert old.warning_details == [] and old.origin_frame is None
+
+
+def test_investigation_endpoint_passes_created_at_when_the_agent_accepts_it(client, app, make_incident):
+    calls = []
+
+    class NewAgent:
+        def investigation(self, incident_id, created_at=None):
+            calls.append((incident_id, created_at))
+            return {"incident_id": incident_id}
+
+    class OldAgent:
+        def investigation(self, incident_id):
+            calls.append((incident_id, "no created_at"))
+            return {"incident_id": incident_id}
+
+    incident = make_incident()
+    original = app.state.agent
+    try:
+        app.state.agent = NewAgent()
+        assert client.get(f"/incidents/{incident['id']}/investigation").status_code == 200
+        app.state.agent = OldAgent()
+        assert client.get(f"/incidents/{incident['id']}/investigation").status_code == 200
+    finally:
+        app.state.agent = original
+    assert calls[0][0] == incident["id"] and calls[0][1] is not None
+    assert calls[0][1].isoformat().startswith(incident["created_at"][:19])
+    assert calls[1] == (incident["id"], "no created_at")
