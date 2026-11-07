@@ -35,6 +35,10 @@ class Category(StrEnum):
     SECURITY = "security"
     DATA_PIPELINE = "data_pipeline"
     EQUIPMENT = "physical_equipment"
+    HEALTHCARE = "healthcare_operations"
+    LOGISTICS = "logistics_operations"
+    CUSTOMER_SUPPORT = "customer_support"
+    SAFETY = "workplace_safety"
     UNKNOWN = "unknown"
 
 
@@ -423,6 +427,7 @@ class SignatureMatch:
     last_seen: datetime | None
     services: tuple[str, ...]
     snippet: str
+    named_fix: bool = False   # a written report says fixing this resolved the incident
 
     @property
     def id(self) -> str:
@@ -468,6 +473,7 @@ def match_signatures(events: Iterable[NormalizedEvent], *, extra_text: dict[str,
             last_seen=max(stamps) if stamps else None,
             services=tuple(sorted({e.service for e, _, _ in items if e is not None and e.service})),
             snippet=items[0][2],
+            named_fix=any(e is not None and e.metadata.get("named_fix") for e, _, _ in items),
         ))
     return tuple(sorted(output, key=lambda m: (m.first_seen is None, m.first_seen or datetime.max, -m.count)))
 

@@ -145,6 +145,18 @@ _PREVIOUS_RELEASE = re.compile(r"(?i)\bthe previous release\b")
 
 
 SEV1_WARNING = "SEV1: post a status update before applying changes"
+# Fields where incidents are about people, equipment and operations rather than software services: plans speak
+# of harm, delays and safe return to use instead of error rates.
+OPERATIONS_CATEGORIES = frozenset({"healthcare_operations", "logistics_operations", "customer_support",
+                                   "workplace_safety", "physical_equipment"})
+
+
+def closing_step(category: str | None) -> str:
+    if category == "workplace_safety":
+        return "Confirm the failed controls are fixed and checked before the area or equipment goes back into use"
+    if category in OPERATIONS_CATEGORIES:
+        return "Confirm normal operations are back and stable before closing the incident"
+    return "Watch error rate and latency for 15 minutes before resolving"
 
 
 def short_frame(location: str) -> str:
@@ -283,7 +295,12 @@ def plan_remediation(hypotheses, *, lessons=(), service: str | None = None, seve
             h=leader, source="memory", reason=f"Verified fix for a similar incident ({past})",
             expected="Resolved the matching incident previously; confirm the same mechanism first", past_incident=past)
     if leader and leader.category.value != "unknown":
-        add(RemediationKind.MONITORING, f"Alert on the leading indicator for '{leader.title}' before it causes user-facing errors", h=leader)
+        if leader.category.value in OPERATIONS_CATEGORIES:
+            add(RemediationKind.MONITORING, f"Track early warnings for '{leader.title}' (near misses, alarms, slowdowns) "
+                "so the next one is caught before it causes harm or delay", h=leader)
+        else:
+            add(RemediationKind.MONITORING, f"Alert on the leading indicator for '{leader.title}' before it causes "
+                "user-facing errors", h=leader)
     # Every action that failed or only helped briefly in a similar incident is a warning, even when this
     # plan never proposed it: responders reach for restarts and scale-outs on their own.
     warned = {classify_action(text) for text in blocked}

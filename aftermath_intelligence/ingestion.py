@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .models import NormalizedEvent, Severity, stable_event_id
+from .reports import looks_like_report, parse_report
 from .stacktrace import parse_stack_trace
 
 MAX_INPUT_BYTES = 5_000_000
@@ -250,8 +251,12 @@ def _from_text(line: str, incident_id: str, source: str, service_hint: str | Non
 # --------------------------------------------------------------------------- driver
 
 def ingest_text(text: str, *, incident_id: str = "unknown", source: str = "text",
-                default_service: str | None = None, max_bytes: int = MAX_INPUT_BYTES) -> IngestionResult:
-    """Parse JSON, JSONL, logfmt, access logs or plain text while retaining provenance."""
+                default_service: str | None = None, max_bytes: int = MAX_INPUT_BYTES,
+                reference: datetime | None = None) -> IngestionResult:
+    """Parse JSON, JSONL, logfmt, access logs, plain text or a written incident report, retaining provenance.
+
+    `reference` (usually the incident's creation time) dates a written report that states times but no date.
+    """
     truncated = len(text.encode("utf-8", errors="replace")) > max_bytes
     if truncated:
         text = text.encode("utf-8", errors="replace")[:max_bytes].decode("utf-8", errors="ignore")
@@ -271,6 +276,12 @@ def ingest_text(text: str, *, incident_id: str = "unknown", source: str = "text"
         unique, duplicates = _dedupe(events)
         unique = _finalize(unique, default_service)
         return IngestionResult(tuple(unique), (), duplicates, {fmt: len(unique)}, truncated)
+
+    if looks_like_report(text):
+        report_events = parse_report(text, incident_id=incident_id, source=source, default_service=default_service,
+                                     reference=reference)
+        unique, duplicates = _dedupe(report_events)
+        return IngestionResult(tuple(unique), (), duplicates, {"report": len(unique)}, truncated)
 
     events: list[NormalizedEvent] = []
     malformed: list[int] = []

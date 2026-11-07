@@ -1,0 +1,87 @@
+"""Logistics, airline and warehouse operations: baggage, sortation, warehouse systems, fleet and cold chain."""
+from ..signatures import Category, Role, Signature
+from . import Pack
+
+PACK = Pack("logistics", "Logistics and airline operations incidents",
+            "Baggage and sortation faults, warehouse and dispatch systems, crew scheduling, fleet tracking, cold chain", (
+    Signature(
+        "mechanical_wear", "worn mechanical part (belt, roller, chain)", Category.LOGISTICS, Role.ORIGIN,
+        (r"\bworn (?:drive )?(?:belts?|rollers?|bearings?|chains?|motors?|gearbox(?:es)?)\b",
+         r"\b(?:belt|roller|chain)s? (?:snapped|broke|slipping|worn)\b"),
+        checks=("Inspect the line's belts, rollers and drives; compare with the maintenance schedule",),
+        mitigations=("Run the affected line at reduced speed or route around it until the part is replaced",),
+        fixes=("Replace the worn part and move it onto a preventive-maintenance schedule",),
+        avoid=("Don't keep clearing jams on a line with a worn part: it will keep faulting",),
+        causes=("conveyor_jam",),
+        tool_hints=("sensor", "metrics"),
+    ),
+    Signature(
+        "conveyor_jam", "baggage / sortation conveyor jam or fault", Category.LOGISTICS, Role.MECHANISM,
+        (r"\bconveyor (?:jam|jammed|stoppage|fault)", r"\bsort(?:er|ation)[^.\n]{0,40}?(?:jam|fault|stopped|down)",
+         r"baggage (?:handling|sortation) system[^.\n]{0,40}?(?:stopped|fault|down|failed)"),
+        checks=("Read the sorter controller's fault log and which line faulted first",),
+        mitigations=("Switch to manual sorting / encoding and add staff to the make-up area",),
+        fixes=("Repair the fault behind the jam before restarting the line",),
+        avoid=("Don't reboot the sorter controller repeatedly: find why the line jams",),
+        causes=("operations_backlog", "departure_delays"),
+        tool_hints=("sensor", "health"),
+    ),
+    Signature(
+        "operations_backlog", "backlog of bags / parcels / orders", Category.LOGISTICS, Role.SYMPTOM,
+        (r"\bbacklog\b[^.\n]{0,40}?(?:bags|parcels|orders|shipments|pallets|containers)",
+         r"\b[\d,]+ (?:bags|parcels|orders|shipments) (?:waiting|stuck|backed up)"),
+        checks=("Measure the backlog by destination and departure time to see what is at risk first",),
+        mitigations=("Prioritise the backlog by departure / cut-off time",),
+        fixes=("Clear the backlog once the root cause is fixed and confirm nothing was left behind",),
+        tool_hints=("metrics",),
+    ),
+    Signature(
+        "departure_delays", "delayed departures / missed connections", Category.LOGISTICS, Role.SYMPTOM,
+        (r"\b\d+ (?:departures|flights|arrivals|trucks|shipments|deliveries) (?:were |was )?(?:delayed|cancel+ed|late)",
+         r"\b(?:flight|departure|delivery|shipment)s? (?:were |was )?delayed", r"missed (?:their )?connecting flights?",
+         r"\bmisconnect\w*"),
+        checks=("List affected departures and connections so customer teams can rebook early",),
+        mitigations=("Start rebooking and customer notifications for missed connections",),
+        fixes=("Recover the schedule after the root cause is fixed",),
+        tool_hints=("metrics",),
+    ),
+    Signature(
+        "operations_system_outage", "warehouse / dispatch / scanning system outage", Category.LOGISTICS, Role.ORIGIN,
+        (r"(?:warehouse management system|\bwms\b|dispatch system|routing system|handheld scanners?|rf scanners?|"
+         r"departure control system|check-in system)[^.\n]{0,50}?(?:down|outage|offline|unavailable|not (?:working|responding)|failed)",),
+        checks=("Check whether the system itself or its network/integration failed, and since when",),
+        mitigations=("Switch to the paper / offline fallback process for picking, loading or check-in",),
+        fixes=("Restore the system and reconcile everything processed on the fallback",),
+        avoid=("Don't keep processing on paper without a reconciliation plan: inventory drifts",),
+        causes=("operations_backlog", "departure_delays"),
+        tool_hints=("health", "config"),
+    ),
+    Signature(
+        "crew_scheduling_failure", "crew scheduling / rostering system failure", Category.LOGISTICS, Role.ORIGIN,
+        (r"crew (?:scheduling|rostering|tracking|management) (?:system )?[^.\n]{0,30}?(?:outage|failure|down|unavailable|failed)",),
+        checks=("Check which crew assignments were lost or not published",),
+        mitigations=("Assign crews manually from the last good roster for the next departures",),
+        fixes=("Restore the scheduling system and re-publish rosters, then check legal rest limits",),
+        avoid=("Don't assign crews manually without checking duty-time limits",),
+        causes=("departure_delays",),
+        tool_hints=("health",),
+    ),
+    Signature(
+        "shipment_temperature_excursion", "refrigerated shipment temperature excursion", Category.LOGISTICS, Role.ORIGIN,
+        (r"(?:reefer|refrigerated (?:trailer|container|truck)|cold[- ]chain shipment)[^.\n]{0,60}?temperature"
+         r"[^.\n]{0,30}?(?:excursion|out of range|above|exceeded|rose)",),
+        checks=("Pull the temperature log for the whole journey and how long it was out of range",),
+        mitigations=("Hold the affected shipment and notify the shipper before delivery",),
+        fixes=("Repair the refrigeration unit and add live temperature alerts",),
+        avoid=("Don't deliver the shipment before the shipper has assessed the excursion",),
+        tool_hints=("sensor", "metrics"),
+    ),
+    Signature(
+        "fleet_tracking_lost", "fleet GPS / telematics lost", Category.LOGISTICS, Role.ORIGIN,
+        (r"(?:gps|telematics|vehicle tracking|fleet tracking)[^.\n]{0,40}?(?:lost|offline|not reporting|no signal|stopped)",),
+        checks=("Check whether one vehicle or the whole fleet stopped reporting (device vs. platform)",),
+        mitigations=("Use driver check-in calls for affected routes",),
+        fixes=("Restore the telematics platform or replace the failed devices",),
+        tool_hints=("sensor", "network"),
+    ),
+))

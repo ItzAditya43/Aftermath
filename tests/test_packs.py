@@ -8,7 +8,8 @@ from aftermath_intelligence.packs import all_packs, enabled_signatures, selected
 from aftermath_intelligence.remediation import RemediationKind
 from aftermath_intelligence.signatures import BY_ID, CATALOG, CORE_CATALOG, Role
 
-PACK_IDS = ("security", "network", "kubernetes", "data_pipeline", "industrial")
+PACK_IDS = ("security", "network", "kubernetes", "data_pipeline", "industrial", "healthcare", "logistics", "support",
+            "safety")
 
 
 def test_all_packs_enabled_by_default_and_ids_unique():

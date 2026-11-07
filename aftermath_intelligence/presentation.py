@@ -12,7 +12,7 @@ from .investigation import InvestigationReport, Phase
 from .prompts import confidence_words
 from .rca import HypothesisState
 from .memory import unsafe_instruction
-from .remediation import past_fix_summary, short_frame
+from .remediation import closing_step, past_fix_summary, short_frame
 
 
 def narrative_context(report: InvestigationReport) -> dict[str, Any]:
@@ -141,7 +141,7 @@ def suggestion_fields(report: InvestigationReport) -> dict[str, Any]:
         marker = " (temporary relief)" if step.temporary else ""
         approval = " [needs approval]" if step.requires_approval else ""
         steps.append(f"{step.description}{marker}{approval}")
-    steps.append("Watch error rate and latency for 15 minutes before resolving")
+    steps.append(closing_step(leader.category.value if leader else None))
     plan = report.remediation
     kinds = plan.warning_kinds if len(plan.warning_kinds) == len(plan.warnings) else ("history",) * len(plan.warnings)
     details = [{"text": text, "kind": kind} for text, kind in zip(plan.warnings, kinds, strict=True)]

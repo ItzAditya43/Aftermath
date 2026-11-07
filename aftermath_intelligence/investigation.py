@@ -435,7 +435,7 @@ class _Run:
         for name, content in sources.items():
             if not content or not content.strip():
                 continue
-            result = ingest_text(content, incident_id=self.case.incident_id, source=name,
+            result = ingest_text(content, incident_id=self.case.incident_id, source=name, reference=self.case.created_at,
                                  default_service=self.case.service)
             events.extend(result.events)
             for key, value in result.detected_formats.items():

@@ -135,7 +135,8 @@ class RealAgent:
         yield SuggestionEvent(**fields)
 
     async def learn_from_resolution(self, incident: IncidentContext, resolution: ResolutionContext) -> None:
-        events = ingest_text(incident.logs, incident_id=incident.id, source="logs", default_service=incident.service).events
+        events = ingest_text(incident.logs, incident_id=incident.id, source="logs", default_service=incident.service,
+                             reference=incident.created_at).events
         report = self._report_for(incident.id, incident.created_at)
         evaluation = evaluate_resolution_report(
             incident_id=incident.id, title=incident.title, service=incident.service, alert_text=incident.alert_text,
@@ -170,7 +171,7 @@ class RealAgent:
                 records.append(existing)
                 continue
             events = ingest_text(incident.logs, incident_id=incident.id, source="logs",
-                                 default_service=incident.service).events
+                                 default_service=incident.service, reference=incident.created_at).events
             record = build_memory_record(
                 incident_id=incident.id, title=incident.title, service=incident.service,
                 alert_text=incident.alert_text, events=events, root_cause=incident.root_cause,
