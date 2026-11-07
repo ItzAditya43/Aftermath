@@ -106,11 +106,14 @@ def clean_headline(text: str) -> str:
 def suggestion_fields(report: InvestigationReport) -> dict[str, Any]:
     """Map to the backend's `Suggestion` contract (likely_root_cause, steps, warnings, confidence, based_on)."""
     leader = report.hypotheses[0] if report.hypotheses else None
+    tentative = False
     if leader is None or leader.status == HypothesisState.UNRESOLVED:
         root = "Unknown: " + (report.headline if report.signatures else "no known failure signature in the alert or logs.")
     else:
-        prefix = "Likely" if leader.status == HypothesisState.LIKELY else "Possibly"
-        root = f"{prefix}: {clean_headline(report.headline)}" if report.headline else f"{prefix}: {leader.title}"
+        # The cause is stated plainly: engineers save this text as the confirmed root cause, so a hedge
+        # ("Likely: ...") would end up in memory. Weak certainty is reported as a warning instead.
+        root = clean_headline(report.headline) if report.headline else leader.title
+        tentative = leader.status != HypothesisState.LIKELY
     steps = []
     for step in report.remediation.steps:
         marker = " (temporary relief)" if step.temporary else ""
@@ -118,6 +121,8 @@ def suggestion_fields(report: InvestigationReport) -> dict[str, Any]:
         steps.append(f"{step.description}{marker}{approval}")
     steps.append("Watch error rate and latency for 15 minutes before resolving")
     warnings = list(report.remediation.warnings)
+    if tentative:
+        warnings.insert(0, "Low certainty: this is a possible cause, but the evidence does not single it out yet.")
     if report.status == Phase.AWAITING_APPROVAL:
         warnings.append("Some diagnostics need human approval before they can run.")
     if not report.memory_consulted:

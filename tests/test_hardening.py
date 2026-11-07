@@ -113,8 +113,23 @@ def test_suggestion_root_cause_never_doubles_label():
     report = run(InvestigationEngine().run(_case(_demo(0))))
     report = report.model_copy(update={"headline": "The most likely root cause is a connection leak."})
     root = suggestion_fields(report)["likely_root_cause"]
-    assert root.split(":", 1)[0] in {"Likely", "Possibly"}
-    assert "most likely" not in root.lower() and root.split(": ", 1)[1].startswith("A connection leak")
+    assert not root.startswith(("Likely", "Possibly"))
+    assert "most likely" not in root.lower() and root.startswith("A connection leak")
+
+
+def test_tentative_root_cause_is_flagged_in_warnings_not_in_the_cause():
+    from aftermath_intelligence.rca import HypothesisState
+
+    report = run(InvestigationEngine().run(_case(_demo(0))))
+    leader = report.hypotheses[0]
+    tentative = report.model_copy(update={"hypotheses": (leader.model_copy(update={"status": HypothesisState.PROPOSED}),
+                                                         *report.hypotheses[1:])})
+    fields = suggestion_fields(tentative)
+    assert not fields["likely_root_cause"].startswith(("Likely", "Possibly"))
+    assert fields["warnings"][0].startswith("Low certainty")
+    likely = suggestion_fields(report.model_copy(update={"hypotheses": (
+        leader.model_copy(update={"status": HypothesisState.LIKELY}), *report.hypotheses[1:])}))
+    assert not any(w.startswith("Low certainty") for w in likely["warnings"])
 
 
 # ---------------------------------------------------------------- C5: heap OOM is not an OOM kill

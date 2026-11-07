@@ -310,6 +310,7 @@ All settings are optional except at least one provider key. Defaults are in `.en
 | `AFTERMATH_NARRATIVE_FIRST_TOKEN_SECONDS`, `AFTERMATH_NARRATIVE_SECONDS` | `8`, `25` | Use the built-in explanation if the AI is slow |
 | `AFTERMATH_MEMORY_PATH` | `.aftermath/memory.jsonl` | Local incident memory (empty = in-process only) |
 | `AFTERMATH_CALIBRATION_PATH` | `.aftermath/calibration.jsonl` | Graded predictions for calibration |
+| `AFTERMATH_CALIBRATION_MIN_SAMPLES` | `30` | Graded outcomes needed before confidence is a calibrated probability (15 for the demo seed) |
 | `AFTERMATH_PACKS` | `all` | Domain packs to load: `all`, `none` or a list such as `security,network` |
 | `AFTERMATH_DOCKER_TOOLS`, `DOCKER_SOCKET` | `0`, `/var/run/docker.sock` | Read-only Docker diagnostics |
 | `GITHUB_REPO`, `AFTERMATH_SERVICE_REPOS`, `GITHUB_TOKEN` | empty | Commit and deploy correlation (`svc=owner/repo,...`); the token is optional for public repos |
@@ -336,9 +337,16 @@ All settings are optional except at least one provider key. Defaults are in `.en
   claims to be Hindsight.
 - **Hindsight:** a Hindsight adapter only needs `recall(query)` and `retain(record)`, the `IncidentMemory`
   protocol in `memory.py`. Pass it as `RealAgent(settings, memory=...)`. It isn't built yet; the backend owns it.
-- **Calibration:** each resolve grades the prediction (correct, partially correct, incorrect). After 30 graded
-  outcomes, `confidence` becomes an isotonic-calibrated probability, clamped to 5–95%, and `confidence_calibrated`
-  is set once the backend's `Suggestion` model has that field (#7 / #11).
+- **Calibration:** each resolve grades the prediction (correct, partially correct, incorrect). Seeding also
+  backtests history: each resolved incident is replayed, oldest first, against memory holding only the incidents
+  before it, and the top hypothesis is graded against the confirmed root cause (deterministic, no AI calls; a
+  grade from a live resolution is never overwritten). After `AFTERMATH_CALIBRATION_MIN_SAMPLES` graded outcomes
+  (default 30), `confidence` becomes an isotonic-calibrated probability, clamped to 5–95%, and the suggestion's
+  `confidence_calibrated` is `true`. The frontend only shows a percentage, or "consensus", when it is `true`.
+  The demo seed backtests 20 incidents, so set the threshold to 15 to see calibrated confidence in a demo.
+  With so few samples the top bucket can rest on a single incident, so treat demo percentages as illustrative.
+- **Root cause wording:** `likely_root_cause` states the cause without "Likely:" / "Possibly:", because engineers
+  save it as the confirmed cause. A tentative leading hypothesis adds a "Low certainty: …" warning instead.
 
 ### Diagnostics connectors (read-only)
 

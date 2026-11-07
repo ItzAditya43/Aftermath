@@ -13,8 +13,9 @@ survive restarts; set AFTERMATH_MEMORY_PATH="" for process-only memory. Both imp
 `aftermath_intelligence.memory.IncidentMemory`, so the Hindsight adapter can be passed as `memory=`
 without touching this file. Reports never claim Hindsight was used (`memory_backend` says what was).
 
-Calibration: graded predictions persist at AFTERMATH_CALIBRATION_PATH. After 30 graded outcomes the
-suggestion confidence becomes an isotonic-calibrated probability instead of a raw ranking score.
+Calibration: graded predictions persist at AFTERMATH_CALIBRATION_PATH. After AFTERMATH_CALIBRATION_MIN_SAMPLES
+(default 30) graded outcomes the suggestion confidence becomes an isotonic-calibrated probability instead of a
+raw ranking score. Grades come from live resolutions and from backtesting resolved history at ingest time.
 
 Diagnostics: read-only Docker / GitHub connectors from env (see aftermath_intelligence.connectors).
 Recent commits and workflow runs are fetched before each investigation for change correlation.
@@ -35,7 +36,7 @@ from aftermath_intelligence.calibration import CalibrationTracker, GradedPredict
 from aftermath_intelligence.connectors import Connectors, connectors_from_env
 from aftermath_intelligence.ingestion import ingest_text
 from aftermath_intelligence.investigation import IncidentCase, InvestigationEngine, InvestigationLimits, InvestigationReport
-from aftermath_intelligence.learning import ResolutionEvaluation, evaluate_resolution_report
+from aftermath_intelligence.learning import ResolutionEvaluation, evaluate_resolution_report, grade_prediction
 from aftermath_intelligence.llm import LLMError, LLMRequest, LLMRouter, LLMSettings
 from aftermath_intelligence.memory import IncidentMemory, InProcessMemory, build_memory_record
 from aftermath_intelligence.presentation import deterministic_narrative, narrative_context, suggestion_fields
@@ -74,8 +75,10 @@ class RealAgent:
         self.engine = InvestigationEngine(router=router, memory=self.memory, tools=tools, limits=self.limits)
         self.stream_narrative = stream_narrative
         calibration_path = os.getenv("AFTERMATH_CALIBRATION_PATH", ".aftermath/calibration.jsonl")
-        self.calibration: CalibrationTracker = (PersistentCalibration(calibration_path) if calibration_path
-                                                else CalibrationTracker())
+        min_samples = int(os.getenv("AFTERMATH_CALIBRATION_MIN_SAMPLES", "30"))
+        self.calibration: CalibrationTracker = (
+            PersistentCalibration(calibration_path, min_samples=min_samples) if calibration_path
+            else CalibrationTracker(min_samples=min_samples))
         # Latest structured report per incident, for richer API endpoints and for grading at resolve time.
         self.reports: OrderedDict[str, InvestigationReport] = OrderedDict()
         self.evaluations: OrderedDict[str, ResolutionEvaluation] = OrderedDict()
@@ -107,9 +110,8 @@ class RealAgent:
         calibrated = self.calibration.calibrate(report.top_score)
         if calibrated is not None:
             fields["confidence"] = calibrated
-        if "confidence_calibrated" in SuggestionEvent.model_fields:
-            # Lets the UI show a percentage only when the score is a real probability.
-            fields["confidence_calibrated"] = calibrated is not None
+        # Lets the UI show a percentage (and consensus) only when the score is a real probability.
+        fields["confidence_calibrated"] = calibrated is not None
         yield SuggestionEvent(**fields)
 
     async def learn_from_resolution(self, incident: IncidentContext, resolution: ResolutionContext) -> None:
@@ -132,18 +134,49 @@ class RealAgent:
                     evaluation.prediction.verdict)
 
     async def ingest_history(self, incidents: list[IncidentContext]) -> None:
-        for incident in incidents:
-            if incident.status != "resolved" or not incident.root_cause:
-                continue
+        resolved = sorted((i for i in incidents if i.status == "resolved" and i.root_cause),
+                          key=lambda i: i.created_at)
+        records = []
+        for incident in resolved:
             events = ingest_text(incident.logs, incident_id=incident.id, source="logs",
                                  default_service=incident.service).events
-            await self.memory.retain(build_memory_record(
+            record = build_memory_record(
                 incident_id=incident.id, title=incident.title, service=incident.service,
                 alert_text=incident.alert_text, events=events, root_cause=incident.root_cause,
                 resolution=incident.resolution, failed_attempts=incident.failed_attempts, severity=incident.severity,
                 created_at=incident.created_at, time_to_resolve_minutes=incident.time_to_resolve_minutes,
                 notes=incident.notes,
-            ))
+            )
+            records.append(record)
+            await self.memory.retain(record)
+        await self._backtest(resolved, records)
+
+    async def _backtest(self, incidents: list[IncidentContext], records: list) -> None:
+        """Grade the engine on resolved history so confidence can be calibrated before live resolutions.
+
+        Each incident is replayed (oldest first) against memory holding only the incidents before it, the
+        way the engine would have met it live, and the top hypothesis is graded against the confirmed
+        root cause. Deterministic only: no AI calls and no connectors, so seeding stays fast and offline.
+        Incidents that already have a grade (e.g. from a live resolution) are left untouched.
+        """
+        earlier = InProcessMemory()
+        engine = InvestigationEngine(memory=earlier, limits=InvestigationLimits(max_llm_calls=0,
+                                                                                 max_seconds=self.limits.max_seconds))
+        graded = 0
+        for incident, record in zip(incidents, records, strict=True):
+            if incident.id not in self.calibration:
+                try:
+                    report = await engine.run(_case(incident))
+                except Exception:  # noqa: BLE001 - one bad historical record must not abort seeding
+                    logger.warning("backtest of %s failed; skipping", incident.id, exc_info=True)
+                else:
+                    grade = grade_prediction(report.hypotheses, incident.root_cause)
+                    self.calibration.record(GradedPrediction(incident.id, report.top_score, grade.verdict,
+                                                             grade.rank_of_actual))
+                    graded += 1
+            await earlier.retain(record)
+        if graded:
+            logger.info("backtested %d historical incident(s); %s", graded, self.calibration.report().note)
 
     async def reset(self) -> None:
         clear = getattr(self.memory, "clear", None)
