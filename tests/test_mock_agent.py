@@ -87,7 +87,12 @@ def test_most_recent_match_ranks_first():
         events = _run(agent, _new(service, title, alert, logs))
         memories = [e for e in events if e.type == "memory"]
         assert memories[0].past_incident_id == newest, (service, [m.past_incident_id for m in memories])
-        assert f"Likely a repeat of {newest}" in events[-1].likely_root_cause
+        suggestion = events[-1]
+        assert suggestion.based_on[0] == newest
+        assert not suggestion.likely_root_cause.startswith("Likely")
+        assert suggestion.likely_root_cause == memories[0].root_cause.strip().rstrip(".")
+        # Recurring patterns (several agreeing matches) report a calibrated confidence for the UI's consensus state.
+        assert suggestion.confidence_calibrated is (len(memories) >= 2)
 
 
 def test_learns_incident_type_without_known_signature():
@@ -105,7 +110,9 @@ def test_learns_incident_type_without_known_signature():
     repeat = _new("search-api", title, alert).model_copy(update={"id": "INC-9002"})
     events = _run(agent, repeat)
     assert [e.past_incident_id for e in events if e.type == "memory"] == ["INC-9001"]
-    assert events[-1].likely_root_cause.startswith("Likely a repeat of INC-9001")
+    assert events[-1].likely_root_cause == "es-node-2 disk over 90% watermark"
+    assert events[-1].based_on == ["INC-9001"]
+    assert events[-1].confidence_calibrated is False  # a single match is a ranking score, not a probability
     assert "Free disk on es-node-2 and reroute unassigned shards" in events[-1].steps
 
 

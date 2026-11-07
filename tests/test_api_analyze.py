@@ -26,7 +26,9 @@ def test_analyze_streams_memory_tokens_suggestion_done(client, seeded, make_inci
     assert "INC-10" in text and "did NOT work" in text
 
     suggestion = SuggestionEvent.model_validate(events[-2][1])
-    assert suggestion.likely_root_cause.startswith("Likely a repeat of INC-")
+    assert not suggestion.likely_root_cause.lower().startswith(("likely", "possibly", "repeat"))
+    assert suggestion.likely_root_cause == memories[0]["root_cause"].strip().rstrip(".")
+    assert suggestion.confidence_calibrated is (len(memories) >= 2)
     assert suggestion.steps and suggestion.warnings
     assert any("restart" in w.lower() for w in suggestion.warnings)
     assert 0.5 < suggestion.confidence <= 0.95

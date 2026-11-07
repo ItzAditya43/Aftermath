@@ -164,6 +164,10 @@ class AgentService(Protocol):
 Two implementations exist: `mock_agent.py` (no keys, scripted recall) and `real_agent.py`, the intelligence engine
 described in [Intelligence engine](#intelligence-engine-aftermath_intelligence). `AGENT_MODE` picks one.
 
+Both state `likely_root_cause` plainly (no "Likely…" hedge), since the frontend pre-fills it when resolving. The mock
+has no graded history, so it sets `confidence_calibrated` only when two or more past incidents agree. That lets the
+UI's "consensus" state be demoed without keys; a single match stays a ranking score.
+
 ### Configuration
 
 | Variable | Default | Purpose |
