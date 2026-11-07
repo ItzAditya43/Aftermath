@@ -148,10 +148,13 @@ def test_calibrated_confidence_reaches_the_stream_and_saved_suggestion(real_sett
         client.post("/admin/seed")
         incident = client.post("/incidents", json=ALERT).json()
         events = _analyze(client, incident["id"])
-        saved = client.get(f"/incidents/{incident['id']}").json()["last_suggestion"]
+        detail = client.get(f"/incidents/{incident['id']}").json()
+    saved = detail["last_suggestion"]
     suggestion = next(d for n, d in events if n == "suggestion")
     assert suggestion["confidence_calibrated"] is True and 0.05 <= suggestion["confidence"] <= 0.95
     assert saved["confidence_calibrated"] is True
+    analysis = [e["message"] for e in detail["timeline"] if e["type"] == "analysis"][-1]
+    assert f"(confidence {round(suggestion['confidence'] * 100)}%)" in analysis
 
 
 def test_empty_llm_stream_falls_back_to_deterministic_narrative(real_settings):

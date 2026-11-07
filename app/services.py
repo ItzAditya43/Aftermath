@@ -260,10 +260,13 @@ def _save_analysis(
         if suggestion is not None:
             row.last_suggestion = suggestion.model_dump(exclude={"type"})
             session.add(row)
-            message = (
-                f"{recalled_text}Suggested root cause: {suggestion.likely_root_cause} "
-                f"(confidence {round(suggestion.confidence * 100)}%)"
+            # A percentage only for a calibrated probability; otherwise it is a ranking score and is shown as one.
+            score = (
+                f"confidence {round(suggestion.confidence * 100)}%"
+                if suggestion.confidence_calibrated
+                else f"uncalibrated ranking score {suggestion.confidence:.2f}"
             )
+            message = f"{recalled_text}Suggested root cause: {suggestion.likely_root_cause} ({score})"
         else:
             message = f"{recalled_text}The agent returned no suggestion."
         add_timeline(session, incident_id, TimelineType.analysis, message)
