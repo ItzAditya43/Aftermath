@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # When empty, the admin routes only accept requests from localhost.
     admin_api_key: str = ""
 
+    # Largest accepted request body. Bigger requests get 413 before they are parsed. 2 MiB fits the largest
+    # valid incident (200k characters of logs, even fully JSON-escaped).
+    max_request_bytes: int = 2 * 1024 * 1024
+
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip().rstrip("/") for origin in self.frontend_origin.split(",") if origin.strip()]

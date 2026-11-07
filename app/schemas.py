@@ -14,10 +14,11 @@ ALERT_TEXT_MAX = 10_000
 LOGS_MAX = 200_000
 CAUSE_MAX = 5_000
 NOTES_MAX = 10_000
+WHAT_FAILED_ITEM_MAX = 1_000
 
 # Leading/trailing whitespace is stripped before length checks, so "   " is rejected as blank.
 Stripped = Annotated[str, StringConstraints(strip_whitespace=True)]
-NonBlankItem = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+FailedAttempt = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=WHAT_FAILED_ITEM_MAX)]
 
 EXAMPLE_ALERT = {
     "title": "payments-api: connection pool exhausted, checkout payments failing",
@@ -101,7 +102,7 @@ class ResolveRequest(BaseModel):
 
     root_cause: Stripped = Field(min_length=1, max_length=CAUSE_MAX)
     fix_that_worked: Stripped = Field(min_length=1, max_length=CAUSE_MAX)
-    what_failed: list[NonBlankItem] = Field(default_factory=list, max_length=50)
+    what_failed: list[FailedAttempt] = Field(default_factory=list, max_length=50)
     notes: Stripped | None = Field(default=None, max_length=NOTES_MAX)
 
 

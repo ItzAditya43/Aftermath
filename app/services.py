@@ -36,6 +36,7 @@ from app.schemas import (
     LOGS_MAX,
     NOTES_MAX,
     TITLE_MAX,
+    WHAT_FAILED_ITEM_MAX,
     IncidentCreate,
     IncidentDetail,
     ResolveRequest,
@@ -139,7 +140,7 @@ def redact_resolution(data: ResolveRequest) -> ResolveRequest:
     return data.model_copy(update={
         "root_cause": _redact(data.root_cause, CAUSE_MAX),
         "fix_that_worked": _redact(data.fix_that_worked, CAUSE_MAX),
-        "what_failed": [redact_sensitive_text(item) for item in data.what_failed],
+        "what_failed": [_redact(item, WHAT_FAILED_ITEM_MAX) for item in data.what_failed],
         "notes": _redact(data.notes, NOTES_MAX) if data.notes is not None else None,
     })
 

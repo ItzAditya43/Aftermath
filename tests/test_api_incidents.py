@@ -269,3 +269,48 @@ def test_redaction_never_pushes_resolution_fields_past_their_limits(client, make
     assert response.status_code == 200
     body = response.json()
     assert len(body["root_cause"]) <= 5000 and len(body["resolution"]) <= 5000
+
+
+# ---------------------------------------------------------------- size limits (#32)
+
+def test_overlong_what_failed_item_is_rejected(client, make_incident):
+    incident = make_incident()
+    response = client.post(f"/incidents/{incident['id']}/resolve",
+                           json={"root_cause": "Leak", "fix_that_worked": "Fixed", "what_failed": ["x" * 200_000]})
+    assert response.status_code == 422
+
+
+def test_ten_megabyte_resolve_is_rejected_before_parsing(client, make_incident):
+    incident = make_incident()
+    response = client.post(f"/incidents/{incident['id']}/resolve",
+                           json={"root_cause": "Leak", "fix_that_worked": "Fixed", "what_failed": ["x" * 2_000_000] * 5})
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "payload_too_large"
+    assert client.get(f"/incidents/{incident['id']}").json()["status"] == "open"  # nothing was stored
+
+
+def test_huge_create_gets_413_not_422(client):
+    response = client.post("/incidents", json={**ALERT, "logs": "x" * 30_000_000})
+    assert response.status_code == 413
+
+
+def test_chunked_body_without_content_length_is_limited(client):
+    def chunks():
+        for _ in range(40):
+            yield b"x" * 65_536  # 2.5 MiB in total, streamed without Content-Length
+
+    response = client.post("/incidents", content=chunks(), headers={"Content-Type": "application/json"})
+    assert response.status_code == 413
+
+
+def test_largest_valid_incident_is_accepted(client):
+    escaped = "é\n" * 100_000  # 200k characters of logs that grow when JSON-escaped
+    response = client.post("/incidents", json={**ALERT, "logs": escaped})
+    assert response.status_code == 201
+
+
+def test_413_carries_cors_headers_for_the_frontend(client):
+    response = client.post("/incidents", json={**ALERT, "logs": "x" * 3_000_000},
+                           headers={"Origin": "http://localhost:3000"})
+    assert response.status_code == 413
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"

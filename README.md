@@ -84,7 +84,7 @@ Field values:
 - Incident IDs look like `INC-1021`. Seed incidents are `INC-1001` to `INC-1020`.
 - Timestamps are ISO-8601 UTC (`...Z`).
 
-**Errors** always have this shape, with status `404`, `409`, `422` or `500`:
+**Errors** always have this shape, with status `401`, `403`, `404`, `409`, `413`, `422` or `500`:
 
 ```json
 {"error": {"code": "not_found", "message": "Incident INC-9999 not found"}}
@@ -189,6 +189,7 @@ calibrated suggestion and "uncalibrated ranking score 0.86" otherwise.
 | `AUTO_SEED` | `false` | seed on startup if the DB is empty |
 | `MOCK_TOKEN_DELAY_MS` | `30` | typing speed of the mock agent's stream |
 | `ADMIN_API_KEY` | empty | required as `X-Admin-Key` on `/admin/*`; when empty, admin routes accept localhost only |
+| `MAX_REQUEST_BYTES` | `2097152` (2 MiB) | larger request bodies get `413` before they are parsed |
 
 `.env` is gitignored. Never commit real keys.
 
