@@ -60,6 +60,9 @@ class CalibrationTracker:
     def clear(self) -> None:
         self._items.clear()
 
+    def __contains__(self, incident_id: object) -> bool:
+        return incident_id in self._items
+
     def calibrate(self, score: float) -> float | None:
         """Map a ranking score to observed accuracy, or None while there are too few graded outcomes.
 

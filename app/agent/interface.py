@@ -85,6 +85,10 @@ class Suggestion(BaseModel):
     steps: list[str] = Field(default_factory=list, description="Ordered remediation steps")
     warnings: list[str] = Field(default_factory=list, description="Things to avoid, e.g. fixes that failed before")
     confidence: float = Field(ge=0.0, le=1.0)
+    confidence_calibrated: bool = Field(
+        default=False,
+        description="True when `confidence` is a calibrated probability; False when it is only a ranking score",
+    )
     based_on: list[str] = Field(default_factory=list, description="IDs of past incidents this is based on")
 
 

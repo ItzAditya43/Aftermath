@@ -53,8 +53,10 @@ def test_real_agent_streams_memory_tokens_then_one_suggestion_with_llm(real_sett
     assert names.count("suggestion") == 1 and names.index("suggestion") > max(i for i, n in enumerate(names) if n == "token")
     assert "".join(d["text"] for n, d in events if n == "token").startswith("The pool is exhausted.")
     suggestion = next(d for n, d in events if n == "suggestion")
-    assert suggestion["likely_root_cause"].startswith(("Likely:", "Possibly:"))
+    assert not suggestion["likely_root_cause"].startswith(("Likely", "Possibly"))
     assert "Hikari" in suggestion["likely_root_cause"]
+    # 20 backtested seed incidents are below the default 30-sample threshold: a ranking score, not a probability.
+    assert suggestion["confidence_calibrated"] is False
     assert set(suggestion["based_on"]) & {"INC-1001", "INC-1009", "INC-1017"}
     assert any("restart" in w.lower() for w in suggestion["warnings"])
     assert 0 < suggestion["confidence"] <= 0.95
@@ -106,6 +108,50 @@ def test_reset_clears_agent_memory(real_settings):
         assert len(agent.memory) == 20
         client.post("/admin/reset")
     assert len(agent.memory) == 0 and not agent.reports
+
+
+def test_seed_backtests_history_into_calibration(real_settings):
+    agent = RealAgent(real_settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""))
+    client, _ = _client(real_settings, agent)
+    with client:
+        client.post("/admin/seed")
+    report = agent.calibration.report()
+    assert report.samples == 20 and report.graded > 0
+    assert not report.calibrated  # default threshold is 30
+
+
+def test_backtest_never_overwrites_a_live_grade(real_settings):
+    import asyncio
+
+    import json
+    from pathlib import Path
+
+    from aftermath_intelligence.calibration import GradedPrediction
+    from app.agent.interface import IncidentContext
+
+    agent = RealAgent(real_settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""))
+    data = json.loads((Path(__file__).parent.parent / "data" / "seed_incidents.json").read_text(encoding="utf-8"))
+    items = data["incidents"] if isinstance(data, dict) else data
+    contexts = [IncidentContext(**{k: v for k, v in i.items() if k in IncidentContext.model_fields}) for i in items]
+    live = GradedPrediction(contexts[0].id, 0.42, "correct", 1)
+    agent.calibration.record(live)
+    asyncio.run(agent.ingest_history(contexts))
+    assert agent.calibration._items[contexts[0].id] == live
+    assert agent.calibration.report().samples == len(contexts)
+
+
+def test_calibrated_confidence_reaches_the_stream_and_saved_suggestion(real_settings, monkeypatch):
+    monkeypatch.setenv("AFTERMATH_CALIBRATION_MIN_SAMPLES", "15")
+    agent = RealAgent(real_settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""))
+    client, _ = _client(real_settings, agent)
+    with client:
+        client.post("/admin/seed")
+        incident = client.post("/incidents", json=ALERT).json()
+        events = _analyze(client, incident["id"])
+        saved = client.get(f"/incidents/{incident['id']}").json()["last_suggestion"]
+    suggestion = next(d for n, d in events if n == "suggestion")
+    assert suggestion["confidence_calibrated"] is True and 0.05 <= suggestion["confidence"] <= 0.95
+    assert saved["confidence_calibrated"] is True
 
 
 def test_empty_llm_stream_falls_back_to_deterministic_narrative(real_settings):
