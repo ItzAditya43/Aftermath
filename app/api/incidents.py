@@ -1,3 +1,4 @@
+import inspect
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request
@@ -121,9 +122,14 @@ def get_investigation(incident_id: str, session: SessionDep, agent: AgentDep) ->
     `404` if the incident doesn't exist, hasn't been analysed since the server started, or the agent
     (e.g. the mock) doesn't produce full investigations. Reports are kept for the last 200 analysed incidents.
     """
-    services.get_incident_or_404(session, incident_id)
+    incident = services.get_incident_or_404(session, incident_id)
     getter = getattr(agent, "investigation", None)
-    data = getter(incident_id) if callable(getter) else None
+    data = None
+    if callable(getter):
+        # Saved reports outlive the DB: ids restart at INC-1021 if it is recreated. Passing created_at lets the
+        # agent refuse an older incident's report for a reused id (agents without that parameter still work).
+        accepts_created_at = "created_at" in inspect.signature(getter).parameters
+        data = getter(incident_id, created_at=incident.created_at) if accepts_created_at else getter(incident_id)
     if data is None:
         raise NotFoundError(
             f"No investigation for {incident_id} yet. Run GET /incidents/{incident_id}/analyze first "

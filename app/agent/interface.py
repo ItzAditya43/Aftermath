@@ -80,6 +80,16 @@ class ResolutionContext(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+WARNING_KINDS = ("severity", "certainty", "history", "unsafe_history", "contradiction", "catalog", "approval", "memory")
+
+
+class WarningDetail(BaseModel):
+    """One warning with its category, so the UI can group them. Same text as the matching `warnings` entry."""
+
+    text: str
+    kind: str = Field(description=f"One of: {', '.join(WARNING_KINDS)} (a new kind from the engine is passed through)")
+
+
 class Suggestion(BaseModel):
     likely_root_cause: str
     steps: list[str] = Field(default_factory=list, description="Ordered remediation steps")
@@ -90,6 +100,12 @@ class Suggestion(BaseModel):
         description="True when `confidence` is a calibrated probability; False when it is only a ranking score",
     )
     based_on: list[str] = Field(default_factory=list, description="IDs of past incidents this is based on")
+    origin_frame: str | None = Field(
+        default=None, description='Stack frame where the failure started, e.g. "ChargebackSyncJob.sync (ChargebackSyncJob.java:92)"',
+    )
+    warning_details: list[WarningDetail] = Field(
+        default_factory=list, description="`warnings` with a category each, in the same order",
+    )
 
 
 class MemoryEvent(BaseModel):

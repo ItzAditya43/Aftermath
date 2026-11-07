@@ -101,7 +101,7 @@ On `422`, the error also includes `details: [{loc, msg, type}]`.
 |---|---|---|
 | `memory` | 0–3 times, first | `{past_incident_id, title, service, summary, relevance_score, root_cause, resolution, failed_attempts[], time_to_resolve_minutes}` |
 | `token` | many | `{text}`: append these to show the explanation typing out |
-| `suggestion` | once | `{likely_root_cause, steps[], warnings[], confidence, based_on[]}` |
+| `suggestion` | once | `{likely_root_cause, steps[], warnings[], warning_details[{text, kind}], confidence, confidence_calibrated, based_on[], origin_frame}` |
 | `done` | last | `{incident_id, memories_used}` |
 | `error` | instead of `done` if the agent fails | `{code, message}` |
 
