@@ -106,7 +106,9 @@ On `422`, the error also includes `details: [{loc, msg, type}]`.
 | `error` | instead of `done` if the agent fails | `{code, message}` |
 
 The backend saves each recalled memory (`GET /memories`), the suggestion (`last_suggestion` on the
-incident), and two `analysis` timeline events. Running the analysis again replaces the earlier memories.
+incident), and two `analysis` timeline events. Running the analysis again replaces the earlier memories, except on a
+resolved incident: its memories stay as they were while it was worked, so `/stats` only counts memory used before
+resolving as "memory-assisted".
 
 ### Frontend: consuming the stream (for Shashank)
 

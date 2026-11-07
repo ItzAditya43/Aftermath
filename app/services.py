@@ -295,21 +295,27 @@ async def stream_analysis(engine: Engine, agent: AgentService, incident: Inciden
 def _save_analysis(
     engine: Engine, incident_id: str, memories: list[MemoryEvent], suggestion: SuggestionEvent | None
 ) -> None:
-    """Replace the incident's memories (and suggestion, if any) from a completed run, atomically."""
+    """Replace the incident's memories (and suggestion, if any) from a completed run, atomically.
+
+    For an incident that is already resolved, the stored memory references are kept: they record what memory was
+    used while the incident was being worked, which /stats relies on. The new run is still streamed and its
+    suggestion saved.
+    """
     with Session(engine) as session:
         row = session.get(Incident, incident_id)
         if row is None:
             return
-        session.exec(delete(MemoryReference).where(MemoryReference.incident_id == incident_id))
-        for m in memories:
-            session.add(
-                MemoryReference(
-                    incident_id=incident_id,
-                    past_incident_id=m.past_incident_id,
-                    summary=m.summary,
-                    relevance_score=m.relevance_score,
+        if row.status != IncidentStatus.resolved:
+            session.exec(delete(MemoryReference).where(MemoryReference.incident_id == incident_id))
+            for m in memories:
+                session.add(
+                    MemoryReference(
+                        incident_id=incident_id,
+                        past_incident_id=m.past_incident_id,
+                        summary=m.summary,
+                        relevance_score=m.relevance_score,
+                    )
                 )
-            )
         recalled = [m.past_incident_id for m in memories]
         recalled_text = f"Recalled {', '.join(recalled)}. " if recalled else "No similar past incidents found. "
         if suggestion is not None:
