@@ -301,10 +301,16 @@ class MockAgent:
 
         confidence = min(0.95, 0.4 + 0.5 * best.score + 0.05 * (len(matches) - 1))
         return SuggestionEvent(
-            likely_root_cause=f"Likely a repeat of {past.id}: {_clean(past.root_cause)}",
+            # Stated plainly: engineers save this as the confirmed root cause, so a hedge or "repeat of INC-x"
+            # would end up in memory. The match itself is already in `based_on` and the streamed explanation.
+            likely_root_cause=_clean(past.root_cause),
             steps=steps,
             warnings=warnings,
             confidence=round(confidence, 2),
+            # The mock is a scripted stand-in with no graded history. It reports a calibrated confidence only
+            # when several past incidents agree (a recurring pattern), so the UI's consensus state can be
+            # demoed without API keys. A single match stays a ranking score, as in the real agent.
+            confidence_calibrated=len(matches) >= 2,
             based_on=[m.entry.incident.id for m in matches],
         )
 
