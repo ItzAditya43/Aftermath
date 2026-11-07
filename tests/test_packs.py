@@ -47,4 +47,6 @@ def test_pack_incidents_get_approval_gated_plans(logs, service, expected):
     for step in report.remediation.steps:
         if step.kind in {RemediationKind.MITIGATION, RemediationKind.ROOT_CAUSE_FIX}:
             assert step.requires_approval, step.description
-    assert any(w.startswith("Avoid:") for w in report.remediation.warnings) or not BY_ID[expected].avoid
+    # Catalog advice arrives as plain sentences (the UI adds its own "Warnings" heading).
+    assert set(BY_ID[expected].avoid) <= set(report.remediation.warnings)
+    assert not any(w.startswith("Avoid:") for w in report.remediation.warnings)

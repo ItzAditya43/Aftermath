@@ -69,7 +69,7 @@ def test_history_warnings_rank_before_generic_catalog_advice():
     plan = plan_remediation([h], lessons=lessons, service="payments-api", severity="SEV1")
     assert plan.warnings[0].startswith("SEV1")
     history = next(i for i, w in enumerate(plan.warnings) if "INC-9" in w)
-    generic = next(i for i, w in enumerate(plan.warnings) if "Raising the pool size" in w)
+    generic = next(i for i, w in enumerate(plan.warnings) if "raise the pool size" in w)
     assert history < generic
 
 
@@ -126,7 +126,8 @@ def test_tentative_root_cause_is_flagged_in_warnings_not_in_the_cause():
                                                          *report.hypotheses[1:])})
     fields = suggestion_fields(tentative)
     assert not fields["likely_root_cause"].startswith(("Likely", "Possibly"))
-    assert fields["warnings"][0].startswith("Low certainty")
+    # The SEV1 status-update reminder stays first; the certainty flag comes right after it.
+    assert fields["warnings"][0].startswith("SEV1") and fields["warnings"][1].startswith("Low certainty")
     likely = suggestion_fields(report.model_copy(update={"hypotheses": (
         leader.model_copy(update={"status": HypothesisState.LIKELY}), *report.hypotheses[1:])}))
     assert not any(w.startswith("Low certainty") for w in likely["warnings"])

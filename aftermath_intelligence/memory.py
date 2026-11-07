@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
@@ -28,6 +28,19 @@ _STOPWORDS = {
     "warn", "info", "true", "false", "null", "exec", "http", "nio", "threshold", "5m",
 }
 _TOKEN = re.compile(r"[a-z][a-z0-9_-]{2,}")
+
+
+_UNSAFE = re.compile(
+    r"(?i)(?:\||&&|;)\s*(?:sudo\s+)?(?:ba|z|da)?sh\b|\b(?:curl|wget)\b[^\n]*\||\brm\s+-[a-z]*(?:rf|fr)\b|\bsudo\b|`|\$\("
+    r"|\b(?:ignore|disregard|forget|override)\b[^.\n]{0,40}\b(?:instructions|prompt|rules)\b|\bsystem prompt\b")
+
+
+def unsafe_instruction(text: str) -> bool:
+    """True when free text typed into a resolution looks like a shell command or an instruction to the AI.
+
+    Such text is kept in memory (it is the record) but never repeated as a plan step or quoted as advice.
+    """
+    return bool(_UNSAFE.search(text))
 
 
 class ActionType(StrEnum):
@@ -182,6 +195,13 @@ class InProcessMemory:
     async def retain(self, record: MemoryRecord) -> None:
         self._records[record.incident_id] = record
 
+    async def retain_many(self, records: Iterable[MemoryRecord]) -> None:
+        for record in records:
+            self._records[record.incident_id] = record
+
+    def get(self, incident_id: str) -> MemoryRecord | None:
+        return self._records.get(incident_id)
+
     async def clear(self) -> None:
         self._records.clear()
 
@@ -189,9 +209,30 @@ class InProcessMemory:
         return score_candidates(query, self._records.values(), threshold=self.threshold)[: query.limit]
 
 
+RECENCY_BONUS = 0.05       # added to the relevance of an incident from today
+RECENCY_WINDOW_DAYS = 180  # ... falling linearly to nothing for incidents this old
+
+
+def recency_bonus(created_at: datetime | None, now: datetime | None = None) -> float:
+    """Small ranking bonus for recent incidents: their fix reflects the current code and releases."""
+    if created_at is None:
+        return 0.0
+    now = now or datetime.now(timezone.utc)
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    age_days = max(0.0, (now - created_at).total_seconds() / 86400)
+    return round(RECENCY_BONUS * max(0.0, 1 - age_days / RECENCY_WINDOW_DAYS), 4)
+
+
 def score_candidates(query: MemoryQuery, records: Iterable[MemoryRecord], *,
-                     threshold: float = 0.35) -> list[RecalledIncident]:
-    """Explainable similarity: signatures 45%, service 20%, keywords 20%, stack/exception 15%."""
+                     threshold: float = 0.35, now: datetime | None = None) -> list[RecalledIncident]:
+    """Explainable similarity: signatures 45%, service 20%, keywords 20%, stack/exception 15%.
+
+    A small recency bonus (at most 0.05, gone after 180 days) is added after the threshold, so it reorders
+    matches but never recalls a new one: between two similar matches the recent one wins (its fix reflects the
+    current code), while a clearly better old match still beats a weaker recent one.
+    """
+    now = now or datetime.now(timezone.utc)
     query_sigs = {s for s in query.signatures if _role(s) != Role.CHANGE}
     query_kw = keywords(query.text)
     output: list[RecalledIncident] = []
@@ -213,6 +254,7 @@ def score_candidates(query: MemoryQuery, records: Iterable[MemoryRecord], *,
         score = 0.45 * sig_score + 0.20 * service_score + 0.20 * kw_score + 0.15 * stack_score
         if score < threshold:
             continue
+        bonus = recency_bonus(record.created_at, now)
         matching = []
         if shared:
             matching.append("shared signatures: " + ", ".join(sorted(shared)))
@@ -222,6 +264,8 @@ def score_candidates(query: MemoryQuery, records: Iterable[MemoryRecord], *,
             matching.append("identical stack trace fingerprint")
         elif exc_shared:
             matching.append("same exception types: " + ", ".join(sorted(exc_shared)))
+        if bonus >= 0.01:
+            matching.append("recent incident")
         differences = []
         if record.service != query.service:
             differences.append(f"different service ({record.service} vs {query.service})")
@@ -231,10 +275,10 @@ def score_candidates(query: MemoryQuery, records: Iterable[MemoryRecord], *,
             differences.append("only in current incident: " + ", ".join(only_now))
         if only_then:
             differences.append("only in past incident: " + ", ".join(only_then))
-        output.append(RecalledIncident(record=record, relevance=round(min(score, 0.99), 3),
+        output.append(RecalledIncident(record=record, relevance=round(min(score + bonus, 0.99), 3),
                                        shared_signatures=tuple(sorted(shared)), matching_points=tuple(matching),
                                        differences=tuple(differences)))
-    output.sort(key=lambda r: (r.relevance, r.record.created_at or datetime.min), reverse=True)
+    output.sort(key=lambda r: (r.relevance, (r.record.created_at or datetime.min).replace(tzinfo=None)), reverse=True)
     return output
 
 
@@ -276,6 +320,8 @@ def derive_lessons(recalled: Iterable[RecalledIncident]) -> tuple[Lesson, ...]:
         outcomes = {a.outcome for _, a in entries}
         kind = "only gave temporary relief" if outcomes == {ResolutionStatus.TEMPORARY} else "did not resolve it"
         example = entries[0][1].description.rstrip(".")
+        if unsafe_instruction(example):
+            example = "the recorded attempt contains commands; see the incident"
         if action == ActionType.OTHER:
             # No action family to name: quote what was actually done instead of "other ...".
             message = f"\"{example[:140]}\" {kind} in {', '.join(ids)}"
@@ -320,8 +366,15 @@ def build_memory_record(*, incident_id: str, title: str, service: str, alert_tex
                         notes: str | None = None, resolution_status: ResolutionStatus | None = None,
                         predicted_root_cause: str | None = None,
                         prediction_correct: bool | None = None) -> MemoryRecord:
+    # Memory is read on every analysis and written to disk on every resolve: cap free text so one oversized
+    # resolution can't bloat the store, slow every recall or blow up an AI prompt.
+    # Memory outlives the incident and is quoted back in later analyses: never store a credential, whoever calls.
+    title, root_cause, resolution, notes = (_safe_text(title, 300), _safe_text(root_cause, 2_000),
+                                            _safe_text(resolution, 2_000), _safe_text(notes, 2_000))
+    alert_text = _safe_text(alert_text, 10_000) or ""
+    failed_attempts = [_safe_text(a, 500) for a in list(failed_attempts)[:20]]
     events = tuple(events)
-    matches = match_signatures(events, extra_text={"alert": f"{title}\n{alert_text}"})
+    matches = match_signatures(events, extra_text={"alert": f"{title}\n{alert_text[:10_000]}"})
     root_matches = match_signatures((), extra_text={"root": root_cause or ""})
     attempts = [AttemptRecord(description=a, action_type=classify_action(a), outcome=classify_failed_attempt(a))
                 for a in failed_attempts if a.strip()]
@@ -336,15 +389,31 @@ def build_memory_record(*, incident_id: str, title: str, service: str, alert_tex
         root_cause_signatures=tuple(m.id for m in root_matches if m.signature.role in {Role.ORIGIN, Role.MECHANISM, Role.CHANGE}),
         stack_fingerprints=tuple(sorted({str(e.metadata["stack_fingerprint"]) for e in events if "stack_fingerprint" in e.metadata})),
         exception_types=tuple(sorted({e.exception_type for e in events if e.exception_type})),
-        keywords=tuple(sorted(keywords(f"{title} {alert_text}")))[:60],
+        keywords=tuple(sorted(keywords(f"{title} {alert_text[:10_000]}")))[:60],
         root_cause=root_cause, resolution=resolution, resolution_status=status, attempts=tuple(attempts),
         time_to_resolve_minutes=time_to_resolve_minutes, notes=notes,
         predicted_root_cause=predicted_root_cause, prediction_correct=prediction_correct,
     )
 
 
+def _safe_text(text: str | None, limit: int) -> str | None:
+    """Redacted and capped. Trim to a margin first so a huge input costs nothing to redact; the margin keeps a
+    credential that crosses the limit whole, so it is still recognised before the final cut."""
+    from .redaction import redact_sensitive_text
+
+    if not text:
+        return text
+    return _cap(redact_sensitive_text(text[: limit + 200]), limit)
+
+
+def _cap(text: str | None, limit: int) -> str | None:
+    if text is None or len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " …[truncated]"
+
+
 __all__ = [
     "ActionType", "AttemptRecord", "IncidentMemory", "InProcessMemory", "Lesson", "MemoryQuery", "MemoryRecord",
     "RecalledIncident", "build_memory_record", "classify_action", "classify_failed_attempt", "derive_lessons",
-    "keywords", "score_candidates",
+    "keywords", "recency_bonus", "score_candidates", "unsafe_instruction",
 ]

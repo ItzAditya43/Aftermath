@@ -30,6 +30,10 @@ class CalibrationBin(BaseModel):
     accuracy: float | None
 
 
+# Below this many graded outcomes a calibrated percentage can rest on one or two incidents per bucket.
+RELIABLE_SAMPLES = 30
+
+
 class CalibrationReport(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -43,6 +47,8 @@ class CalibrationReport(BaseModel):
     bins: tuple[CalibrationBin, ...]
     calibrated: bool
     note: str
+    min_samples: int = 30
+    illustrative: bool = False   # calibrated on fewer than RELIABLE_SAMPLES outcomes: shape only, not trustworthy
 
 
 class CalibrationTracker:
@@ -111,6 +117,9 @@ class CalibrationTracker:
             unresolved=len(items) - len(graded),
             overconfident_misses=tuple(p.incident_id for p in graded if p.score >= 0.7 and p.verdict == "incorrect"),
             bins=tuple(bins), calibrated=calibrated,
-            note=("Enough graded outcomes to compare scores with observed accuracy." if calibrated else
+            min_samples=self.min_samples, illustrative=calibrated and len(graded) < RELIABLE_SAMPLES,
+            note=(("Calibrated on only {n} outcomes: treat percentages as illustrative.".format(n=len(graded))
+                   if len(graded) < RELIABLE_SAMPLES else
+                   "Enough graded outcomes to compare scores with observed accuracy.") if calibrated else
                   f"Only {len(graded)} graded outcome(s); scores are rankings, not probabilities "
                   f"(need {self.min_samples})."))
