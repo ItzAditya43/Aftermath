@@ -35,11 +35,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         init_db(engine)
         with Session(engine) as session:
             if settings.auto_seed and session.exec(select(Incident.id).limit(1)).first() is None:
-                result = await seed_database(session, agent)
+                result = await seed_database(session, app.state.agent)
                 logger.info("Auto-seeded %d incidents", result.seeded)
-            if settings.agent_mode == "mock":
-                # The mock keeps memory in-process; rebuild it from the DB after a restart.
-                await warm_agent_from_db(session, agent)
+            # Rebuild agent memory from the DB on every start: the mock keeps memory in-process, and the real
+            # agent's memory file may be missing (fresh machine, new container, deleted .aftermath/). Ingest is
+            # idempotent (upsert by incident id) and the real agent's backtest skips already-graded incidents.
+            await warm_agent_from_db(session, app.state.agent)
         yield
         engine.dispose()
 

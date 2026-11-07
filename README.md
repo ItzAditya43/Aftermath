@@ -55,6 +55,10 @@ curl localhost:8000/stats                              # time-to-resolve droppin
 
 `POST /admin/reset` wipes everything so you can run the demo again.
 
+The admin routes are protected. With `ADMIN_API_KEY` set, send it as `X-Admin-Key: <key>`; otherwise they return
+`401`. With no key set, they only accept requests from localhost (`403` otherwise), so the commands above work on
+your machine and nobody else on the network can wipe the demo.
+
 ### Endpoints
 
 | Method | Path | Body / query | Returns |
@@ -65,9 +69,12 @@ curl localhost:8000/stats                              # time-to-resolve droppin
 | `GET` | `/incidents/{id}/analyze` | | **Server-Sent Events** stream (see below) |
 | `POST` | `/incidents/{id}/resolve` | `{root_cause, fix_that_worked, what_failed[], notes?}` | resolved incident and `memory_saved`; `409` if already resolved |
 | `GET` | `/incidents/{id}/memories` | | past incidents the agent used, most relevant first, each with `past_incident` details |
+| `GET` | `/incidents/{id}/investigation` | | full investigation (causal graph, ranked hypotheses with score breakdown, remediation, replay, calibration); `404` until analysed or in mock mode |
 | `GET` | `/stats` | | totals, `avg_ttr_with_memory` vs `avg_ttr_without_memory`, monthly `ttr_over_time`, per-incident `resolutions` |
 | `POST` | `/admin/seed` | `?rebase_dates=true` | `{seeded, skipped, ingested}` (idempotent) |
 | `POST` | `/admin/reset` | | `{deleted: {...}}` |
+
+Both `/admin` routes need `X-Admin-Key` when `ADMIN_API_KEY` is set (`401` otherwise), or a localhost caller when it isn't (`403`).
 | `GET` | `/health` | | `{status, agent_mode, agent, database}` |
 
 Field values:
@@ -165,8 +172,10 @@ Two implementations exist: `mock_agent.py` (no keys, scripted recall) and `real_
 described in [Intelligence engine](#intelligence-engine-aftermath_intelligence). `AGENT_MODE` picks one.
 
 Both state `likely_root_cause` plainly (no "Likely…" hedge), since the frontend pre-fills it when resolving. The mock
-has no graded history, so it sets `confidence_calibrated` only when two or more past incidents agree. That lets the
-UI's "consensus" state be demoed without keys; a single match stays a ranking score.
+has no graded history, so its `confidence_calibrated` is always `false` (a ranking score). To demo calibrated
+confidence and the UI's "consensus" state, use `AGENT_MODE=real` with `AFTERMATH_CALIBRATION_MIN_SAMPLES=15`: it
+runs without API keys and calibrates from the backtested seed. The timeline shows "confidence 86%" only for a
+calibrated suggestion and "uncalibrated ranking score 0.86" otherwise.
 
 ### Configuration
 
@@ -179,6 +188,7 @@ UI's "consensus" state be demoed without keys; a single match stays a ranking sc
 | `FRONTEND_ORIGIN` | `http://localhost:3000` | CORS allowlist, comma-separated |
 | `AUTO_SEED` | `false` | seed on startup if the DB is empty |
 | `MOCK_TOKEN_DELAY_MS` | `30` | typing speed of the mock agent's stream |
+| `ADMIN_API_KEY` | empty | required as `X-Admin-Key` on `/admin/*`; when empty, admin routes accept localhost only |
 
 `.env` is gitignored. Never commit real keys.
 
@@ -218,7 +228,8 @@ stats, and the mock agent's recall. It runs against a temporary SQLite file with
 
 `render.yaml` defines one free web service. To deploy:
 1. In Render, choose **New → Blueprint** and pick this repo.
-2. Set `FRONTEND_ORIGIN` (and the agent keys, once the real agent is in use).
+2. Set `FRONTEND_ORIGIN` (and the agent keys, once the real agent is in use). Render generates `ADMIN_API_KEY`;
+   copy it from the dashboard to call `/admin/*` with `X-Admin-Key`.
 3. Check that `GET /health` returns `{"status": "ok"}`.
 
 The free plan's disk is ephemeral, so SQLite is wiped whenever the service restarts or spins down

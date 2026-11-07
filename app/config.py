@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     # Delay between streamed tokens in the mock agent. Set to 0 in tests.
     mock_token_delay_ms: int = 30
 
+    # Protects /admin/seed and /admin/reset. When set, callers must send it in the X-Admin-Key header.
+    # When empty, the admin routes only accept requests from localhost.
+    admin_api_key: str = ""
+
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip().rstrip("/") for origin in self.frontend_origin.split(",") if origin.strip()]

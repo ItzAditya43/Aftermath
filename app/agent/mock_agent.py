@@ -307,10 +307,10 @@ class MockAgent:
             steps=steps,
             warnings=warnings,
             confidence=round(confidence, 2),
-            # The mock is a scripted stand-in with no graded history. It reports a calibrated confidence only
-            # when several past incidents agree (a recurring pattern), so the UI's consensus state can be
-            # demoed without API keys. A single match stays a ranking score, as in the real agent.
-            confidence_calibrated=len(matches) >= 2,
+            # The mock has no graded history, so its confidence is a ranking score, never a calibrated
+            # probability. For calibrated confidence (and the UI's consensus state) use AGENT_MODE=real:
+            # it runs without API keys and calibrates from backtested history.
+            confidence_calibrated=False,
             based_on=[m.entry.incident.id for m in matches],
         )
 

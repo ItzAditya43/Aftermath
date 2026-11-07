@@ -1,5 +1,10 @@
 from datetime import datetime, timezone
 
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import create_app
+
 
 def test_seed_loads_20_incidents(client, seeded):
     assert seeded == {"seeded": 20, "skipped": 0, "ingested": 20}
@@ -132,3 +137,47 @@ def test_auto_seed_on_startup_and_mock_memory_survives_restart(settings):
     with TestClient(restarted) as c:
         assert len(c.get("/incidents").json()) == 20  # not seeded twice
         assert len(restarted.state.agent.memory) == 20
+
+
+# ---------------------------------------------------------------- admin routes are protected (#8)
+
+
+@pytest.fixture
+def keyed_client(settings):
+    app = create_app(settings.model_copy(update={"admin_api_key": "s3cret-admin-key"}))
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.mark.parametrize("path", ["/admin/seed", "/admin/reset"])
+@pytest.mark.parametrize("headers", [{}, {"X-Admin-Key": "wrong"}])
+def test_admin_routes_need_the_key_when_one_is_set(keyed_client, path, headers):
+    response = keyed_client.post(path, headers=headers)
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
+
+
+def test_admin_routes_work_with_the_right_key(keyed_client):
+    headers = {"X-Admin-Key": "s3cret-admin-key"}
+    assert keyed_client.post("/admin/seed", headers=headers).json()["seeded"] == 20
+    assert keyed_client.post("/admin/reset", headers=headers).status_code == 200
+    assert keyed_client.get("/incidents").json() == []
+
+
+def test_rejected_reset_deletes_nothing(keyed_client):
+    keyed_client.post("/admin/seed", headers={"X-Admin-Key": "s3cret-admin-key"})
+    assert keyed_client.post("/admin/reset").status_code == 401
+    assert len(keyed_client.get("/incidents").json()) == 20
+
+
+@pytest.mark.parametrize("path", ["/admin/seed", "/admin/reset"])
+def test_without_a_key_admin_routes_refuse_non_local_callers(settings, path):
+    with TestClient(create_app(settings), client=("203.0.113.7", 50000)) as remote:
+        response = remote.post(path)
+        assert response.status_code == 403 and response.json()["error"]["code"] == "forbidden"
+        assert remote.get("/incidents").status_code == 200  # the rest of the API is unaffected
+
+
+def test_without_a_key_admin_routes_work_from_localhost(settings):
+    with TestClient(create_app(settings), client=("127.0.0.1", 50000)) as local:
+        assert local.post("/admin/seed").status_code == 200

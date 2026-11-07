@@ -91,8 +91,7 @@ def test_most_recent_match_ranks_first():
         assert suggestion.based_on[0] == newest
         assert not suggestion.likely_root_cause.startswith("Likely")
         assert suggestion.likely_root_cause == memories[0].root_cause.strip().rstrip(".")
-        # Recurring patterns (several agreeing matches) report a calibrated confidence for the UI's consensus state.
-        assert suggestion.confidence_calibrated is (len(memories) >= 2)
+        assert suggestion.confidence_calibrated is False  # no graded history: a ranking score, never a probability
 
 
 def test_learns_incident_type_without_known_signature():

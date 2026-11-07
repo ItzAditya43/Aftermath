@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, col, delete, select
 
+from aftermath_intelligence.redaction import redact_sensitive_text
 from app.agent.interface import (
     AgentService,
     DoneEvent,
@@ -105,7 +106,30 @@ def incident_detail(session: Session, incident: Incident) -> IncidentDetail:
 # ---------------------------------------------------------------------------
 
 
+def redact_incident(data: IncidentCreate) -> IncidentCreate:
+    """Strip credentials (passwords, tokens, cloud keys, JWTs, ...) before anything is stored or returned.
+
+    Pasted logs often contain secrets; once redacted here they never reach the DB, the API, the browser or the
+    agent. Idempotent, and ordinary log text is left unchanged.
+    """
+    return data.model_copy(update={
+        "title": redact_sensitive_text(data.title),
+        "alert_text": redact_sensitive_text(data.alert_text),
+        "logs": redact_sensitive_text(data.logs),
+    })
+
+
+def redact_resolution(data: ResolveRequest) -> ResolveRequest:
+    return data.model_copy(update={
+        "root_cause": redact_sensitive_text(data.root_cause),
+        "fix_that_worked": redact_sensitive_text(data.fix_that_worked),
+        "what_failed": [redact_sensitive_text(item) for item in data.what_failed],
+        "notes": redact_sensitive_text(data.notes) if data.notes is not None else None,
+    })
+
+
 def create_incident(session: Session, data: IncidentCreate) -> Incident:
+    data = redact_incident(data)
     incident = Incident(id=next_incident_id(session), **data.model_dump())
     session.add(incident)
     add_timeline(
@@ -135,6 +159,7 @@ async def resolve_incident(
     if incident.status == IncidentStatus.resolved:
         raise ConflictError(f"Incident {incident.id} is already resolved")
 
+    data = redact_resolution(data)
     now = utcnow()
     incident.status = IncidentStatus.resolved
     incident.resolved_at = now
@@ -260,10 +285,13 @@ def _save_analysis(
         if suggestion is not None:
             row.last_suggestion = suggestion.model_dump(exclude={"type"})
             session.add(row)
-            message = (
-                f"{recalled_text}Suggested root cause: {suggestion.likely_root_cause} "
-                f"(confidence {round(suggestion.confidence * 100)}%)"
+            # A percentage only for a calibrated probability; otherwise it is a ranking score and is shown as one.
+            score = (
+                f"confidence {round(suggestion.confidence * 100)}%"
+                if suggestion.confidence_calibrated
+                else f"uncalibrated ranking score {suggestion.confidence:.2f}"
             )
+            message = f"{recalled_text}Suggested root cause: {suggestion.likely_root_cause} ({score})"
         else:
             message = f"{recalled_text}The agent returned no suggestion."
         add_timeline(session, incident_id, TimelineType.analysis, message)

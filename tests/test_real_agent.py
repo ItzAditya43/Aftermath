@@ -148,10 +148,13 @@ def test_calibrated_confidence_reaches_the_stream_and_saved_suggestion(real_sett
         client.post("/admin/seed")
         incident = client.post("/incidents", json=ALERT).json()
         events = _analyze(client, incident["id"])
-        saved = client.get(f"/incidents/{incident['id']}").json()["last_suggestion"]
+        detail = client.get(f"/incidents/{incident['id']}").json()
+    saved = detail["last_suggestion"]
     suggestion = next(d for n, d in events if n == "suggestion")
     assert suggestion["confidence_calibrated"] is True and 0.05 <= suggestion["confidence"] <= 0.95
     assert saved["confidence_calibrated"] is True
+    analysis = [e["message"] for e in detail["timeline"] if e["type"] == "analysis"][-1]
+    assert f"(confidence {round(suggestion['confidence'] * 100)}%)" in analysis
 
 
 def test_empty_llm_stream_falls_back_to_deterministic_narrative(real_settings):
@@ -191,3 +194,40 @@ def test_real_agent_memory_and_calibration_survive_restart(real_settings, tmp_pa
     assert any(n == "memory" and d["past_incident_id"] == "INC-OLD" for n, d in events)
     suggestion = next(d for n, d in events if n == "suggestion")
     assert suggestion["confidence"] == second.calibration.calibrate(second.reports[incident["id"]].top_score)
+
+
+def test_real_agent_rebuilds_memory_from_the_database_on_startup(real_settings, tmp_path):
+    """#10: with the memory file gone (fresh machine / new container), startup reloads resolved incidents."""
+    first = RealAgent(real_settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""))
+    client, _ = _client(real_settings, first)
+    with client:
+        client.post("/admin/seed")
+    (tmp_path / "memory.jsonl").unlink()
+
+    fresh = RealAgent(real_settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""))
+    assert len(fresh.memory) == 0
+    client, _ = _client(real_settings, fresh)
+    with client:
+        assert len(fresh.memory) == 20
+        incident = client.post("/incidents", json=ALERT).json()
+        events = _analyze(client, incident["id"])
+    assert {d["past_incident_id"] for n, d in events if n == "memory"} & {"INC-1001", "INC-1009", "INC-1017"}
+
+
+def test_full_investigation_endpoint(real_settings):
+    """#12: GET /incidents/{id}/investigation returns the full report once analysed."""
+    agent = RealAgent(real_settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""))
+    client, _ = _client(real_settings, agent)
+    with client:
+        client.post("/admin/seed")
+        incident = client.post("/incidents", json=ALERT).json()
+        before = client.get(f"/incidents/{incident['id']}/investigation")
+        _analyze(client, incident["id"])
+        after = client.get(f"/incidents/{incident['id']}/investigation")
+        missing = client.get("/incidents/INC-9999/investigation")
+    assert before.status_code == 404 and before.json()["error"]["code"] == "not_found"
+    assert after.status_code == 200
+    body = after.json()
+    assert {"hypotheses", "graph", "replay", "remediation", "calibration"} <= body.keys()
+    assert body["incident_id"] == incident["id"] and body["hypotheses"]
+    assert missing.status_code == 404

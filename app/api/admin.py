@@ -1,13 +1,19 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
-from app.api.deps import AgentDep
+from app.api.deps import AgentDep, require_admin
 from app.db import SessionDep
+from app.errors import error_responses
 from app.schemas import ResetResponse, SeedResponse
 from app.seeding import reset_database, seed_database
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter(
+    prefix="/admin",
+    tags=["admin"],
+    dependencies=[Depends(require_admin)],
+    responses=error_responses(401, 403),
+)
 
 
 @router.post("/seed", response_model=SeedResponse)

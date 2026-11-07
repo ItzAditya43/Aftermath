@@ -28,7 +28,7 @@ def test_analyze_streams_memory_tokens_suggestion_done(client, seeded, make_inci
     suggestion = SuggestionEvent.model_validate(events[-2][1])
     assert not suggestion.likely_root_cause.lower().startswith(("likely", "possibly", "repeat"))
     assert suggestion.likely_root_cause == memories[0]["root_cause"].strip().rstrip(".")
-    assert suggestion.confidence_calibrated is (len(memories) >= 2)
+    assert suggestion.confidence_calibrated is False  # the mock's confidence is a ranking score
     assert suggestion.steps and suggestion.warnings
     assert any("restart" in w.lower() for w in suggestion.warnings)
     assert 0.5 < suggestion.confidence <= 0.95
@@ -48,6 +48,9 @@ def test_analyze_persists_memories_suggestion_and_timeline(client, seeded, make_
     analysis = [e["message"] for e in detail["timeline"] if e["type"] == "analysis"]
     assert len(analysis) == 2
     assert "Suggested root cause" in analysis[1]
+    # Uncalibrated (mock) confidence is never presented as a percentage.
+    assert "uncalibrated ranking score 0." in analysis[1] and "%" not in analysis[1]
+    assert detail["last_suggestion"]["confidence_calibrated"] is False
 
     memories = client.get(f"/incidents/{incident['id']}/memories").json()
     assert [m["past_incident_id"] for m in memories] == streamed_ids  # sorted by relevance, like the stream
@@ -150,3 +153,11 @@ def test_example_alert_matches_conftest_shape():
 
     IncidentCreate.model_validate(EXAMPLE_ALERT)
     IncidentCreate.model_validate(ALERT)
+
+
+def test_investigation_endpoint_is_404_for_the_mock_agent(client, seeded, make_incident, analyze):
+    incident = make_incident()
+    analyze(incident["id"])
+    response = client.get(f"/incidents/{incident['id']}/investigation")
+    assert response.status_code == 404
+    assert "AGENT_MODE=real" in response.json()["error"]["message"]
