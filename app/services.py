@@ -30,7 +30,17 @@ from app.models import (
     TimelineType,
     utcnow,
 )
-from app.schemas import IncidentCreate, IncidentDetail, ResolveRequest, TimelineEventOut
+from app.schemas import (
+    ALERT_TEXT_MAX,
+    CAUSE_MAX,
+    LOGS_MAX,
+    NOTES_MAX,
+    TITLE_MAX,
+    IncidentCreate,
+    IncidentDetail,
+    ResolveRequest,
+    TimelineEventOut,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,19 +129,25 @@ def redact_incident(data: IncidentCreate) -> IncidentCreate:
     agent. Idempotent, and ordinary log text is left unchanged.
     """
     return data.model_copy(update={
-        "title": redact_sensitive_text(data.title),
-        "alert_text": redact_sensitive_text(data.alert_text),
-        "logs": redact_sensitive_text(data.logs),
+        "title": _redact(data.title, TITLE_MAX),
+        "alert_text": _redact(data.alert_text, ALERT_TEXT_MAX),
+        "logs": _redact(data.logs, LOGS_MAX),
     })
 
 
 def redact_resolution(data: ResolveRequest) -> ResolveRequest:
     return data.model_copy(update={
-        "root_cause": redact_sensitive_text(data.root_cause),
-        "fix_that_worked": redact_sensitive_text(data.fix_that_worked),
+        "root_cause": _redact(data.root_cause, CAUSE_MAX),
+        "fix_that_worked": _redact(data.fix_that_worked, CAUSE_MAX),
         "what_failed": [redact_sensitive_text(item) for item in data.what_failed],
-        "notes": redact_sensitive_text(data.notes) if data.notes is not None else None,
+        "notes": _redact(data.notes, NOTES_MAX) if data.notes is not None else None,
     })
+
+
+def _redact(text: str, limit: int) -> str:
+    """Redact, then keep the documented length limit: "[REDACTED]" can be longer than the secret it replaces."""
+    text = redact_sensitive_text(text)
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def create_incident(session: Session, data: IncidentCreate) -> Incident:

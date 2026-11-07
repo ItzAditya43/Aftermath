@@ -1,11 +1,23 @@
 """Request and response models for the HTTP API."""
 
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from app.agent.interface import Suggestion
 from app.models import IncidentStatus, Severity, TimelineType
+
+# Field limits, shared with app.services so text that grows during redaction is cut back to them.
+TITLE_MAX = 200
+ALERT_TEXT_MAX = 10_000
+LOGS_MAX = 200_000
+CAUSE_MAX = 5_000
+NOTES_MAX = 10_000
+
+# Leading/trailing whitespace is stripped before length checks, so "   " is rejected as blank.
+Stripped = Annotated[str, StringConstraints(strip_whitespace=True)]
+NonBlankItem = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 EXAMPLE_ALERT = {
     "title": "payments-api: connection pool exhausted, checkout payments failing",
@@ -31,11 +43,11 @@ EXAMPLE_ALERT = {
 class IncidentCreate(BaseModel):
     model_config = ConfigDict(json_schema_extra={"examples": [EXAMPLE_ALERT]})
 
-    title: str = Field(min_length=3, max_length=200)
+    title: Stripped = Field(min_length=3, max_length=TITLE_MAX)
     service: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9._-]*$")
     severity: Severity
-    alert_text: str = Field(min_length=1, max_length=10_000)
-    logs: str = Field(default="", max_length=200_000)
+    alert_text: Stripped = Field(min_length=1, max_length=ALERT_TEXT_MAX)
+    logs: str = Field(default="", max_length=LOGS_MAX)
 
 
 class IncidentSummary(BaseModel):
@@ -87,10 +99,10 @@ class ResolveRequest(BaseModel):
         }
     )
 
-    root_cause: str = Field(min_length=1, max_length=5_000)
-    fix_that_worked: str = Field(min_length=1, max_length=5_000)
-    what_failed: list[str] = Field(default_factory=list, max_length=50)
-    notes: str | None = Field(default=None, max_length=10_000)
+    root_cause: Stripped = Field(min_length=1, max_length=CAUSE_MAX)
+    fix_that_worked: Stripped = Field(min_length=1, max_length=CAUSE_MAX)
+    what_failed: list[NonBlankItem] = Field(default_factory=list, max_length=50)
+    notes: Stripped | None = Field(default=None, max_length=NOTES_MAX)
 
 
 class ResolveResponse(IncidentDetail):

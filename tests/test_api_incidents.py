@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlmodel import Session
 
 from app.models import Incident
@@ -230,3 +231,41 @@ def test_create_retries_when_another_process_took_the_id(client, make_incident, 
     response = client.post("/incidents", json=ALERT)
     assert response.status_code == 201 and response.json()["id"] != taken
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------- blank text and redaction growth (#33)
+
+@pytest.mark.parametrize("field, value", [("title", "   "), ("title", "  ab  "), ("alert_text", "  \n ")])
+def test_blank_or_whitespace_padded_text_is_rejected(client, field, value):
+    response = client.post("/incidents", json={**ALERT, field: value})
+    assert response.status_code == 422
+
+
+def test_title_and_alert_are_stored_trimmed(make_incident):
+    incident = make_incident(title="  payments-api errors  ", alert_text="\n 5xx spike \n")
+    assert incident["title"] == "payments-api errors" and incident["alert_text"] == "5xx spike"
+
+
+def test_redaction_never_pushes_a_title_past_its_limit(make_incident):
+    incident = make_incident(title=("token=a " * 25)[:199])
+    assert len(incident["title"]) <= 200
+    assert "token=a " not in incident["title"] and "[REDACTED]" in incident["title"]
+
+
+@pytest.mark.parametrize("payload", [
+    {"root_cause": "   ", "fix_that_worked": "Fixed it"},
+    {"root_cause": "Leak", "fix_that_worked": " \n "},
+    {"root_cause": "Leak", "fix_that_worked": "Fixed it", "what_failed": ["   "]},
+])
+def test_blank_resolution_fields_are_rejected(client, make_incident, payload):
+    incident = make_incident()
+    assert client.post(f"/incidents/{incident['id']}/resolve", json=payload).status_code == 422
+
+
+def test_redaction_never_pushes_resolution_fields_past_their_limits(client, make_incident):
+    incident = make_incident()
+    grown = ("token=a " * 700)[:4999]
+    response = client.post(f"/incidents/{incident['id']}/resolve", json={"root_cause": grown, "fix_that_worked": grown})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["root_cause"]) <= 5000 and len(body["resolution"]) <= 5000
