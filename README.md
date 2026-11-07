@@ -69,6 +69,7 @@ your machine and nobody else on the network can wipe the demo.
 | `GET` | `/incidents/{id}/analyze` | | **Server-Sent Events** stream (see below) |
 | `POST` | `/incidents/{id}/resolve` | `{root_cause, fix_that_worked, what_failed[], notes?}` | resolved incident and `memory_saved`; `409` if already resolved |
 | `GET` | `/incidents/{id}/memories` | | past incidents the agent used, most relevant first, each with `past_incident` details |
+| `GET` | `/incidents/{id}/investigation` | | full investigation (causal graph, ranked hypotheses with score breakdown, remediation, replay, calibration); `404` until analysed or in mock mode |
 | `GET` | `/stats` | | totals, `avg_ttr_with_memory` vs `avg_ttr_without_memory`, monthly `ttr_over_time`, per-incident `resolutions` |
 | `POST` | `/admin/seed` | `?rebase_dates=true` | `{seeded, skipped, ingested}` (idempotent) |
 | `POST` | `/admin/reset` | | `{deleted: {...}}` |

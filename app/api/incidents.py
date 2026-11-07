@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request
 from sqlmodel import col, select
@@ -7,7 +7,7 @@ from sse_starlette.sse import EventSourceResponse
 from app import services
 from app.api.deps import AgentDep
 from app.db import SessionDep
-from app.errors import error_responses
+from app.errors import NotFoundError, error_responses
 from app.models import Incident, IncidentStatus, MemoryReference
 from app.schemas import (
     IncidentCreate,
@@ -98,6 +98,38 @@ async def resolve_incident(
     incident, memory_saved = await services.resolve_incident(session, agent, incident, data)
     detail = services.incident_detail(session, incident)
     return ResolveResponse(**detail.model_dump(), memory_saved=memory_saved)
+
+
+@router.get(
+    "/{incident_id}/investigation",
+    response_model=dict[str, Any],
+    responses={
+        200: {
+            "description": (
+                "The latest full investigation as JSON: `headline`, `chain` and causal `graph`, ranked `hypotheses` "
+                "with their score breakdown, `evidence`, `anomalies`, `recalled_incidents` and `lessons`, the "
+                "`remediation` plan, a step-by-step `replay`, plus `resolution_evaluation` (after resolve) and "
+                "`calibration`. Evidence is already redacted."
+            )
+        },
+        **error_responses(404),
+    },
+)
+def get_investigation(incident_id: str, session: SessionDep, agent: AgentDep) -> dict[str, Any]:
+    """The full investigation behind the suggestion (real agent only).
+
+    `404` if the incident doesn't exist, hasn't been analysed since the server started, or the agent
+    (e.g. the mock) doesn't produce full investigations. Reports are kept for the last 200 analysed incidents.
+    """
+    services.get_incident_or_404(session, incident_id)
+    getter = getattr(agent, "investigation", None)
+    data = getter(incident_id) if callable(getter) else None
+    if data is None:
+        raise NotFoundError(
+            f"No investigation for {incident_id} yet. Run GET /incidents/{incident_id}/analyze first "
+            "(full investigations need AGENT_MODE=real)."
+        )
+    return data
 
 
 @router.get("/{incident_id}/memories", response_model=list[MemoryReferenceOut], responses=error_responses(404))

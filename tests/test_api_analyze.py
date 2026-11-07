@@ -153,3 +153,11 @@ def test_example_alert_matches_conftest_shape():
 
     IncidentCreate.model_validate(EXAMPLE_ALERT)
     IncidentCreate.model_validate(ALERT)
+
+
+def test_investigation_endpoint_is_404_for_the_mock_agent(client, seeded, make_incident, analyze):
+    incident = make_incident()
+    analyze(incident["id"])
+    response = client.get(f"/incidents/{incident['id']}/investigation")
+    assert response.status_code == 404
+    assert "AGENT_MODE=real" in response.json()["error"]["message"]

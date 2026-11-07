@@ -212,3 +212,22 @@ def test_real_agent_rebuilds_memory_from_the_database_on_startup(real_settings, 
         incident = client.post("/incidents", json=ALERT).json()
         events = _analyze(client, incident["id"])
     assert {d["past_incident_id"] for n, d in events if n == "memory"} & {"INC-1001", "INC-1009", "INC-1017"}
+
+
+def test_full_investigation_endpoint(real_settings):
+    """#12: GET /incidents/{id}/investigation returns the full report once analysed."""
+    agent = RealAgent(real_settings, router=router(Recorder(), order="groq", GROQ_API_KEY=""))
+    client, _ = _client(real_settings, agent)
+    with client:
+        client.post("/admin/seed")
+        incident = client.post("/incidents", json=ALERT).json()
+        before = client.get(f"/incidents/{incident['id']}/investigation")
+        _analyze(client, incident["id"])
+        after = client.get(f"/incidents/{incident['id']}/investigation")
+        missing = client.get("/incidents/INC-9999/investigation")
+    assert before.status_code == 404 and before.json()["error"]["code"] == "not_found"
+    assert after.status_code == 200
+    body = after.json()
+    assert {"hypotheses", "graph", "replay", "remediation", "calibration"} <= body.keys()
+    assert body["incident_id"] == incident["id"] and body["hypotheses"]
+    assert missing.status_code == 404
