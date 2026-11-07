@@ -41,6 +41,7 @@ _CONTINUATION = re.compile(
     r"|During handling of the above exception|The above exception was the direct cause|goroutine \d+ \[|\s+/\S+\.go:\d+"
     r"|[a-z][\w.$]*(?:\.[A-Z][\w$]*)+(?:Exception|Error)(?::|$)|java\.lang\.\w+(?::|$))"
 )
+_GO_FRAME_FUNC = re.compile(r"^[\w./*()-]+\.[\w*()-]+\(.*\)$")
 _CONTAINER_EVENT = re.compile(
     r"oomkilled|crashloopbackoff|back-off restarting|liveness probe|readiness probe|killing container|"
     r"started container|pulling image|container (?:died|exited|restarted)|evicted", re.I)
@@ -338,6 +339,17 @@ def _is_continuation(line: str, previous: NormalizedEvent) -> bool:
             return previous.severity in {Severity.ERROR, Severity.CRITICAL}
         return last.startswith(("During handling", "The above exception"))
     if _CONTINUATION.match(line):
+        return True
+    stack = previous.stack_trace or ""
+    last = stack.rsplit("\n", 1)[-1]
+    # Python prints the source line under each `File "..."` frame, indented.
+    if line[:1].isspace() and last.lstrip().startswith('File "'):
+        return True
+    # Go: the "[signal SIGSEGV ...]" line after a panic, and the unindented function lines between the
+    # tab-indented file:line lines of a goroutine dump.
+    if line.startswith("[signal ") and ("panic" in previous.raw or "runtime error" in previous.message):
+        return True
+    if "goroutine " in stack and (_GO_FRAME_FUNC.match(line) or line.startswith("created by ")):
         return True
     # An exception headline straight after an error line ("Charge failed\norg.x.FooException: ...").
     headline = re.match(r"^(?:[\w$]+\.)+[A-Z][\w$]*(?:Exception|Error)\b", line)

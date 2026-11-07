@@ -21,7 +21,7 @@ _GO_LOC = re.compile(r"^\s+(?P<file>/?[\w./-]+\.go):(?P<line>\d+)")
 _LIBRARY_HINTS = (
     "java.", "javax.", "jdk.", "sun.", "com.sun.", "org.springframework.", "org.apache.", "org.hibernate.",
     "com.zaxxer.", "io.netty.", "kotlin.", "scala.", "org.postgresql.", "com.mysql.", "reactor.", "io.grpc.",
-    "site-packages", "dist-packages", "/lib/python", "<frozen", "node_modules", "node:internal", "internal/",
+    "site-packages", "dist-packages", "/lib/python", "<frozen", "node_modules", "node:internal",
     "/usr/lib", "/usr/local/go/", "runtime/", "net/http.", "asyncio/", "starlette/", "uvicorn/",
 )
 
@@ -84,6 +84,10 @@ class StackTrace:
 
 
 def _is_application(function: str, file: str | None) -> bool:
+    # Old Node versions print core modules as a bare "internal/..." path; an app's own internal/ package
+    # (common in Go: /src/internal/posting/poster.go) is application code.
+    if file and file.startswith("internal/"):
+        return False
     text = f"{function} {file or ''}"
     return not any(hint in text for hint in _LIBRARY_HINTS)
 

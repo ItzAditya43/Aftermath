@@ -23,11 +23,12 @@ jobs:
         run: ruff check --isolated --select E,F,B,S --ignore E501,S101 aftermath_intelligence app/agent/real_agent.py scripts
       - name: Tests (no network, no API keys)
         run: pytest -q
-      - name: Intelligence eval (must stay 100% with no unsafe steps)
+      - name: Intelligence eval (100%, no unsafe steps, all stack-frame / history checks)
         run: |
           python scripts/evaluate_intelligence.py | tee eval.txt
           grep -q "unsafe steps: 0" eval.txt
           ! grep -q "^FAIL" eval.txt
+          grep -q "extra checks failed: 0" eval.txt
 
   frontend:
     name: Frontend (types, lint, tests, build)

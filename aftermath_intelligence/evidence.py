@@ -178,8 +178,18 @@ class EvidenceLedger:
         ))
 
 
+# Attributes that hold structured values (names, enums, timestamps), never free text from the logs.
+_STRUCTURED_KEYS = frozenset({"service", "services", "timestamp", "severity", "signature", "category", "role",
+                              "first_seen", "method", "kind", "anomaly", "stack_language", "change_id"})
+
+
 def _evidence(kind: EvidenceKind, summary: str, source: str, event_ids: tuple[str, ...],
               attributes: dict[str, str | int | float | bool | None]) -> Evidence:
+    # Every piece of evidence is redacted here, whatever built it (anomaly summaries and error fingerprints quote
+    # raw log lines). Redaction is idempotent, so builders that already redacted are unaffected.
+    summary = redact_sensitive_text(summary)
+    attributes = {k: redact_sensitive_text(v) if isinstance(v, str) and k not in _STRUCTURED_KEYS else v
+                  for k, v in attributes.items()}
     material = "\0".join((kind.value, source, summary, *sorted(event_ids)))
     identifier = sha256(material.encode()).hexdigest()[:24]
     return Evidence(evidence_id=identifier, kind=kind, summary=summary, source=source,

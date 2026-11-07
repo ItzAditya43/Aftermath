@@ -115,18 +115,20 @@ def generate_hypotheses(*, service: str, matches: Iterable[SignatureMatch], chai
         affected = match.services[0] if match.services else service
         if signature.role == Role.CHANGE:
             title = f"Regression introduced by a {signature.label}"
-            description = (f"A {signature.label} preceded the failure; the change may have introduced "
-                           f"{_join([by_id[r].signature.label for r in chain.root_candidates if r in by_id]) or 'the failure'}.")
+            introduced = _join([by_id[r].signature.label for r in chain.root_candidates if r in by_id])
+            description = (f"A {signature.label} preceded the failure and may have introduced "
+                           f"{introduced or 'it'}.")
         elif signature.role == Role.MECHANISM:
             title = f"{signature.label.capitalize()} on {affected}"
-            description = (f"{signature.label.capitalize()} is observed and explains "
-                           f"{_join([by_id[e].signature.label for e in explained]) or 'the symptoms'}; "
-                           "what drove it there is not yet identified.")
+            effects = _join([by_id[e].signature.label for e in explained])
+            description = (f"{signature.label.capitalize()} on {affected}"
+                           + (f", causing {effects}" if effects else "")
+                           + "; what drove it there is not identified yet.")
         else:
             title = f"{signature.label.capitalize()} in {affected}"
-            description = (f"{signature.label.capitalize()} is observed"
-                           + (f" and is a known cause of {_join([by_id[e].signature.label for e in explained])}" if explained else "")
-                           + ".")
+            effects = _join([by_id[e].signature.label for e in explained])
+            description = (f"{signature.label.capitalize()} in {affected}"
+                           + (f", which leads to {effects}" if effects else "") + ".")
         h = Hypothesis(id=hypothesis_id(f"sig:{sig_id}"), title=title, description=description,
                        category=signature.category, affected_service=affected, signature_id=sig_id,
                        supporting_evidence_ids=tuple(dict.fromkeys(supporting)), score=0.0,
