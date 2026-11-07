@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
@@ -240,6 +241,8 @@ class InvestigationReport(BaseModel):
     lessons: tuple[Lesson, ...]
     blast_radius: dict[str, list[str]]
     change_suspects: tuple[ChangeSuspect, ...] = ()
+    origin_frame: str | None = None        # application frame the leading hypothesis's stack trace points at
+    current_version: str | None = None     # release running now (from the alert or recent deploys), if known
     memory_backend: str | None
     memory_consulted: bool
     llm: LLMUsage
@@ -310,6 +313,8 @@ class _Run:
         self.tool_calls = 0
         self.assessment: LLMAssessment | None = None
         self.change_suspects: tuple[ChangeSuspect, ...] = ()
+        self.origin_frame: str | None = None
+        self.current_version: str | None = None
         self.change_evidence: dict[str, str] = {}
         self._pending: list[ProgressUpdate] = []
 
@@ -350,13 +355,15 @@ class _Run:
 
     async def execute(self) -> AsyncIterator[ProgressUpdate]:
         try:
+            # Parsing and signature matching are pure CPU work (about a second on 200 KB of logs). They run in a
+            # worker thread so a large analysis never stalls the server's event loop for other requests.
             self.to(Phase.INGESTING)
-            events, ingest_stats = self.ingest()
+            events, ingest_stats = await asyncio.to_thread(self.ingest)
             for u in self.drain():
                 yield u
 
             self.to(Phase.ANALYZING)
-            analysis, matches, anomalies, chain, sig_evidence = self.analyze(events)
+            analysis, matches, anomalies, chain, sig_evidence = await asyncio.to_thread(self.analyze, events)
             for u in self.drain():
                 yield u
             recalled, lessons = await self.recall(events, matches)
@@ -384,8 +391,11 @@ class _Run:
                 self.record("perspectives_compared", f"{len(debate.stances)} perspective stances; "
                             f"{len(debate.disagreements)} disagreement(s)", outputs=list(debate.agreement))
 
+            self.origin_frame = leader_origin_frame(hypotheses[0] if hypotheses else None, self.ledger.items)
+            self.current_version = current_release(self.case, self.change_suspects)
             remediation = plan_remediation(hypotheses, lessons=lessons, service=self.case.service,
-                                           severity=self.case.severity)
+                                           severity=self.case.severity, origin_frame=self.origin_frame,
+                                           current_version=self.current_version)
             self.record("remediation_planned", f"{len(remediation.steps)} steps, {len(remediation.blocked_actions)} "
                         "blocked by history", outputs=[s.id for s in remediation.steps])
 
@@ -425,7 +435,7 @@ class _Run:
         for name, content in sources.items():
             if not content or not content.strip():
                 continue
-            result = ingest_text(content, incident_id=self.case.incident_id, source=name,
+            result = ingest_text(content, incident_id=self.case.incident_id, source=name, reference=self.case.created_at,
                                  default_service=self.case.service)
             events.extend(result.events)
             for key, value in result.detected_formats.items():
@@ -802,7 +812,7 @@ class _Run:
         evidence_by_kind: dict[tuple[str, str], str] = {}
         for item in self.ledger.by_kind(EvidenceKind.ANOMALY):
             evidence_by_kind[(str(item.attributes.get("anomaly")), item.summary)] = item.evidence_id
-        anomaly_findings = tuple(AnomalyFinding(kind=a.kind.value, summary=a.summary, severity=a.severity, method=a.method,
+        anomaly_findings = tuple(AnomalyFinding(kind=a.kind.value, summary=redact_sensitive_text(a.summary), severity=a.severity, method=a.method,
                                                 service=a.service, observed=a.observed, baseline=a.baseline,
                                                 evidence_id=evidence_by_kind.get((a.kind.value, a.summary)))
                                  for a in anomalies)
@@ -818,22 +828,22 @@ class _Run:
                                           evidence_id=sig_evidence.get(m.id), event_id=m.event_ids[0]))
         for a in anomalies:
             if a.window_start:
-                timeline.append(TimelineEntry(at=a.window_start, service=a.service, kind=a.kind.value, summary=a.summary,
+                timeline.append(TimelineEntry(at=a.window_start, service=a.service, kind=a.kind.value, summary=redact_sensitive_text(a.summary),
                                               evidence_id=evidence_by_kind.get((a.kind.value, a.summary)),
                                               event_id=a.event_ids[0] if a.event_ids else None))
         for suspect in self.change_suspects[:3]:
             if suspect.change.timestamp:
                 timeline.append(TimelineEntry(at=suspect.change.timestamp, service=suspect.change.service, kind="change",
-                                              summary=f"{suspect.change.kind} {suspect.change.id[:12]}: {suspect.change.title[:120]}",
+                                              summary=f"{suspect.change.kind} {suspect.change.id[:12]}: {_clip(suspect.change.title, 120)}",
                                               evidence_id=self.change_evidence.get(suspect.change.id)))
         if self.case.created_at:
             timeline.append(TimelineEntry(at=self.case.created_at, service=self.case.service, kind="alert",
-                                          summary=f"alert raised: {self.case.alert_text[:140]}"))
+                                          summary=f"alert raised: {_clip(self.case.alert_text, 140)}"))
         timeline.sort(key=lambda t: (t.at is None, t.at or datetime.max.replace(tzinfo=timezone.utc)))
         stamps = [e.timestamp for e in events if e.timestamp]
         stats = LogStats(
             events=len(events), severity_counts=analysis.severity_counts, service_error_counts=analysis.service_error_counts,
-            top_error_groups=tuple({"fingerprint": g.fingerprint[:160], "count": g.count, "services": list(g.services),
+            top_error_groups=tuple({"fingerprint": _clip(g.fingerprint, 160), "count": g.count, "services": list(g.services),
                                     "exception_type": g.exception_type, "event_ids": list(g.event_ids[:5])}
                                    for g in analysis.error_groups[:8]),
             formats=ingest_stats["formats"], malformed_lines=ingest_stats["malformed"],
@@ -853,13 +863,56 @@ class _Run:
             hypothesis_comparison=compare_top(hypotheses), llm_assessment=self.assessment, debate=debate,
             diagnostics=tuple(self.diagnostics), remediation=remediation, recalled_incidents=tuple(recalled),
             lessons=tuple(lessons), blast_radius=blast_radius(self.case.service, matches, self.case.dependencies),
-            change_suspects=self.change_suspects,
+            change_suspects=self.change_suspects, origin_frame=self.origin_frame,
+            current_version=self.current_version,
             memory_backend=memory.backend if memory else None, memory_consulted=memory is not None and not any(
                 "memory recall failed" in d for d in self.degraded),
             llm=LLMUsage(calls=self.budget.used, providers=tuple(dict.fromkeys(self.llm_providers)),
                          models=tuple(dict.fromkeys(self.llm_models)), fallbacks=tuple(dict.fromkeys(self.llm_fallbacks)),
                          errors=tuple(self.llm_errors)),
             degraded=tuple(dict.fromkeys(self.degraded)), replay=tuple(self.replay), phases=tuple(self.sm.history))
+
+
+_VERSION = r"v\d+(?:\.\d+){1,3}(?:-[\w.]+)?"
+_DEPLOYED_VERSION = re.compile(r"(?i)\b(?:deploy(?:ed|ment|ing)?|release[sd]?|rollout|rolled out|upgraded? to|version)\b"
+                               r"[^\n]{0,40}?\b(" + _VERSION + r")\b")
+_ANY_VERSION = re.compile(r"\b(" + _VERSION + r")\b")
+
+
+def current_release(case: IncidentCase, suspects=()) -> str | None:
+    """The release running now: named next to a deploy word in the alert, else in a suspected change, else logs."""
+    head = f"{case.title}\n{case.alert_text}"
+    match = _DEPLOYED_VERSION.search(head) or _ANY_VERSION.search(head)
+    if match:
+        return match.group(1)
+    for suspect in suspects:
+        match = _ANY_VERSION.search(suspect.change.title or "")
+        if match:
+            return match.group(1)
+    match = _DEPLOYED_VERSION.search(case.logs[:200_000])
+    return match.group(1) if match else None
+
+
+def leader_origin_frame(leader: Hypothesis | None, items) -> str | None:
+    """The first application stack frame in the evidence behind the leading hypothesis's signature.
+
+    Only frames from the events that matched the leader's own signature count. A connection-leak report
+    must point at the class holding the connection, not at the request that timed out waiting for it.
+    """
+    if leader is None or not leader.signature_id:
+        return None
+    signature_events = {event_id for item in items if item.kind == EvidenceKind.SIGNATURE
+                        and item.attributes.get("signature") == leader.signature_id for event_id in item.event_ids}
+    for item in items:
+        frame = item.attributes.get("origin_frame")
+        if frame and signature_events.intersection(item.event_ids):
+            return str(frame)
+    return None
+
+
+def _clip(text: str, limit: int) -> str:
+    """Redact, then truncate: truncating first can cut a credential into a fragment redaction won't recognise."""
+    return redact_sensitive_text(text or "")[:limit]
 
 
 async def _maybe_await(value: Any) -> Any:

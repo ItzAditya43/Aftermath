@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .models import NormalizedEvent, Severity, stable_event_id
+from .reports import looks_like_report, parse_report
 from .stacktrace import parse_stack_trace
 
 MAX_INPUT_BYTES = 5_000_000
@@ -41,6 +42,7 @@ _CONTINUATION = re.compile(
     r"|During handling of the above exception|The above exception was the direct cause|goroutine \d+ \[|\s+/\S+\.go:\d+"
     r"|[a-z][\w.$]*(?:\.[A-Z][\w$]*)+(?:Exception|Error)(?::|$)|java\.lang\.\w+(?::|$))"
 )
+_GO_FRAME_FUNC = re.compile(r"^[\w./*()-]+\.[\w*()-]+\(.*\)$")
 _CONTAINER_EVENT = re.compile(
     r"oomkilled|crashloopbackoff|back-off restarting|liveness probe|readiness probe|killing container|"
     r"started container|pulling image|container (?:died|exited|restarted)|evicted", re.I)
@@ -249,8 +251,12 @@ def _from_text(line: str, incident_id: str, source: str, service_hint: str | Non
 # --------------------------------------------------------------------------- driver
 
 def ingest_text(text: str, *, incident_id: str = "unknown", source: str = "text",
-                default_service: str | None = None, max_bytes: int = MAX_INPUT_BYTES) -> IngestionResult:
-    """Parse JSON, JSONL, logfmt, access logs or plain text while retaining provenance."""
+                default_service: str | None = None, max_bytes: int = MAX_INPUT_BYTES,
+                reference: datetime | None = None) -> IngestionResult:
+    """Parse JSON, JSONL, logfmt, access logs, plain text or a written incident report, retaining provenance.
+
+    `reference` (usually the incident's creation time) dates a written report that states times but no date.
+    """
     truncated = len(text.encode("utf-8", errors="replace")) > max_bytes
     if truncated:
         text = text.encode("utf-8", errors="replace")[:max_bytes].decode("utf-8", errors="ignore")
@@ -270,6 +276,12 @@ def ingest_text(text: str, *, incident_id: str = "unknown", source: str = "text"
         unique, duplicates = _dedupe(events)
         unique = _finalize(unique, default_service)
         return IngestionResult(tuple(unique), (), duplicates, {fmt: len(unique)}, truncated)
+
+    if looks_like_report(text):
+        report_events = parse_report(text, incident_id=incident_id, source=source, default_service=default_service,
+                                     reference=reference)
+        unique, duplicates = _dedupe(report_events)
+        return IngestionResult(tuple(unique), (), duplicates, {"report": len(unique)}, truncated)
 
     events: list[NormalizedEvent] = []
     malformed: list[int] = []
@@ -338,6 +350,17 @@ def _is_continuation(line: str, previous: NormalizedEvent) -> bool:
             return previous.severity in {Severity.ERROR, Severity.CRITICAL}
         return last.startswith(("During handling", "The above exception"))
     if _CONTINUATION.match(line):
+        return True
+    stack = previous.stack_trace or ""
+    last = stack.rsplit("\n", 1)[-1]
+    # Python prints the source line under each `File "..."` frame, indented.
+    if line[:1].isspace() and last.lstrip().startswith('File "'):
+        return True
+    # Go: the "[signal SIGSEGV ...]" line after a panic, and the unindented function lines between the
+    # tab-indented file:line lines of a goroutine dump.
+    if line.startswith("[signal ") and ("panic" in previous.raw or "runtime error" in previous.message):
+        return True
+    if "goroutine " in stack and (_GO_FRAME_FUNC.match(line) or line.startswith("created by ")):
         return True
     # An exception headline straight after an error line ("Charge failed\norg.x.FooException: ...").
     headline = re.match(r"^(?:[\w$]+\.)+[A-Z][\w$]*(?:Exception|Error)\b", line)

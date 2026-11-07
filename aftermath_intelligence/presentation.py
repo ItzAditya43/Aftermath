@@ -11,6 +11,8 @@ from typing import Any
 from .investigation import InvestigationReport, Phase
 from .prompts import confidence_words
 from .rca import HypothesisState
+from .memory import unsafe_instruction
+from .remediation import closing_step, past_fix_summary, short_frame
 
 
 def narrative_context(report: InvestigationReport) -> dict[str, Any]:
@@ -27,15 +29,31 @@ def narrative_context(report: InvestigationReport) -> dict[str, Any]:
         "anomalies": [a.summary for a in report.anomalies[:4]],
         "failure_chain": {"roots": list(report.chain.root_candidates), "contributing": list(report.chain.contributing),
                           "symptoms": list(report.chain.symptoms), "triggers": list(report.chain.triggers)},
-        "past_incidents": [{"id": r.record.incident_id, "relevance": r.relevance, "root_cause": r.record.root_cause,
-                            "fix": r.record.resolution,
-                            "did_not_work": [a.description for a in r.record.attempts if a.outcome.value in {"failed", "temporary"}]}
+        "origin_frame": report.origin_frame,
+        "current_release": report.current_version,
+        # Stored resolution text is user input: commands or instructions in it are withheld from the model.
+        "past_incidents": [{"id": r.record.incident_id, "relevance": r.relevance, "root_cause": _safe(r.record.root_cause),
+                            # Old release numbers are restated against the current release, as in the plan.
+                            "fix": _past_fix(r.record.resolution, report.current_version),
+                            "did_not_work": [_safe(a.description) for a in r.record.attempts
+                                             if a.outcome.value in {"failed", "temporary"}]}
                            for r in report.recalled_incidents[:3]],
         "warnings": list(report.remediation.warnings[:5]),
         "plan": [s.description for s in report.remediation.steps[:6]],
         "memory": "not consulted" if not report.memory_consulted else f"{report.memory_backend} memory",
         "limitations": list(report.degraded),
     }
+
+
+def _safe(text: str | None) -> str | None:
+    if text and unsafe_instruction(text):
+        return "[withheld: the recorded text contains commands or instructions]"
+    return text
+
+
+def _past_fix(text: str | None, current_version: str | None) -> str | None:
+    safe = _safe(text)
+    return past_fix_summary(safe, current_version, limit=400) if safe and safe == text else safe
 
 
 def deterministic_narrative(report: InvestigationReport) -> str:
@@ -63,6 +81,8 @@ def deterministic_narrative(report: InvestigationReport) -> str:
         if sig:
             parts.append(f'The logs show it directly: "{sig.snippet[:140]}" ({sig.count} occurrence'
                          f'{"s" if sig.count != 1 else ""}). ')
+        if report.origin_frame:
+            parts.append(f"The stack trace points to {short_frame(report.origin_frame)}. ")
         if report.chain.symptoms:
             parts.append("It also explains the downstream symptoms ("
                          + ", ".join(s.replace('_', ' ') for s in report.chain.symptoms) + "). ")
@@ -113,21 +133,34 @@ def suggestion_fields(report: InvestigationReport) -> dict[str, Any]:
         # The cause is stated plainly: engineers save this text as the confirmed root cause, so a hedge
         # ("Likely: ...") would end up in memory. Weak certainty is reported as a warning instead.
         root = clean_headline(report.headline) if report.headline else leader.title
+        if report.origin_frame and short_frame(report.origin_frame).split(" (")[0] not in root:
+            root = f"{root.rstrip('.')}. The stack trace points to {short_frame(report.origin_frame)}."
         tentative = leader.status != HypothesisState.LIKELY
     steps = []
     for step in report.remediation.steps:
         marker = " (temporary relief)" if step.temporary else ""
         approval = " [needs approval]" if step.requires_approval else ""
         steps.append(f"{step.description}{marker}{approval}")
-    steps.append("Watch error rate and latency for 15 minutes before resolving")
-    warnings = list(report.remediation.warnings)
+    steps.append(closing_step(leader.category.value if leader else None))
+    plan = report.remediation
+    kinds = plan.warning_kinds if len(plan.warning_kinds) == len(plan.warnings) else ("history",) * len(plan.warnings)
+    details = [{"text": text, "kind": kind} for text, kind in zip(plan.warnings, kinds, strict=True)]
     if tentative:
-        warnings.insert(0, "Low certainty: this is a possible cause, but the evidence does not single it out yet.")
+        # After the SEV1 status-update reminder, which always comes first.
+        first = 1 if details and details[0]["kind"] == "severity" else 0
+        details.insert(first, {"text": "Low certainty: this is a possible cause, but the evidence does not single it "
+                                       "out yet.", "kind": "certainty"})
     if report.status == Phase.AWAITING_APPROVAL:
-        warnings.append("Some diagnostics need human approval before they can run.")
+        details.append({"text": "Some diagnostics need human approval before they can run.", "kind": "approval"})
     if not report.memory_consulted:
-        warnings.append("Historical memory was not consulted.")
-    based_on = list(dict.fromkeys(i for h in report.hypotheses[:2] for i in h.based_on_incidents)) or \
-        [r.record.incident_id for r in report.recalled_incidents[:3]]
-    return {"likely_root_cause": root[:600], "steps": steps[:9], "warnings": list(dict.fromkeys(warnings))[:8],
-            "confidence": round(min(0.95, max(0.05, report.top_score)), 2), "based_on": based_on}
+        details.append({"text": "Historical memory was not consulted.", "kind": "memory"})
+    details = list({d["text"]: d for d in details}.values())[:8]
+    warnings = [d["text"] for d in details]
+    # Exactly the incidents streamed as `memory` events, so the UI's consensus check always agrees with them.
+    based_on = [r.record.incident_id for r in report.recalled_incidents]
+    return {"likely_root_cause": root[:600], "steps": steps[:9], "warnings": warnings,
+            "confidence": round(min(0.95, max(0.05, report.top_score)), 2), "based_on": based_on,
+            # Structured extras for the UI. The agent only sends them once the backend's Suggestion model has
+            # these fields, so older backends keep working (see RealAgent.analyze).
+            "warning_details": details,
+            "origin_frame": short_frame(report.origin_frame) if report.origin_frame else None}

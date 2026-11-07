@@ -1,7 +1,8 @@
 """Incident packs: domain pattern libraries that extend the core catalog beyond application incidents.
 
 The investigation pipeline (evidence, failure chain, ranked hypotheses, memory lessons, approval-gated
-plan) is domain-neutral; only the patterns and playbooks change per field. A pack is a named tuple of
+plan) is domain-neutral; only the patterns and playbooks change per field. The healthcare, logistics, support
+and safety packs are written for prose reports (see `reports.py`) as well as logs. A pack is a named tuple of
 `Signature`s with the same contract as the core catalog: read-only checks, temporary mitigations,
 permanent fixes, actions to avoid, and the signatures each one commonly causes.
 
@@ -27,11 +28,15 @@ class Pack:
 
 def all_packs() -> tuple[Pack, ...]:
     from .data_pipeline import PACK as DATA
+    from .healthcare import PACK as HEALTHCARE
     from .industrial import PACK as INDUSTRIAL
     from .kubernetes import PACK as KUBERNETES
+    from .logistics import PACK as LOGISTICS
     from .network import PACK as NETWORK
+    from .safety import PACK as SAFETY
     from .security import PACK as SECURITY
-    return (SECURITY, NETWORK, KUBERNETES, DATA, INDUSTRIAL)
+    from .support import PACK as SUPPORT
+    return (SECURITY, NETWORK, KUBERNETES, DATA, INDUSTRIAL, HEALTHCARE, LOGISTICS, SUPPORT, SAFETY)
 
 
 def selected_pack_ids(raw: str | None = None) -> tuple[str, ...]:

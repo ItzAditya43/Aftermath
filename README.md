@@ -282,22 +282,27 @@ scoring; the AI checks it and writes the explanation. If every AI provider is do
 
 1. **Read the evidence.** Logs are normalised from JSON, logfmt, nginx/access logs, Docker output, syslog and
    plain text, including multi-line Java, Python, Node and Go stack traces. The engine finds the "origin frame",
-   the first line of your own code in the trace.
-2. **Match known failures.** 59 failure signatures (32 core plus 5 domain packs) are matched. Each one is tagged as
+   the first line of your own code in the trace. Written incident reports (prose) are read too; see Incident packs.
+2. **Match known failures.** 88 failure signatures (32 core plus 9 domain packs) are matched. Each one is tagged as
    an origin, mechanism, contributor, symptom or change.
 3. **Flag anomalies, with the reason.** It flags the incident onset, error spikes against a baseline (robust
    z-score), saturated resources (for example `40/40 connections, 212 waiting`), restart loops and new error types.
 4. **Build the failure chain.** Root cause → contributing factors → triggers → downstream symptoms, as a causal
    graph whose edges are marked observed, known or inferred.
 5. **Recall memory.** It finds similar past incidents and turns them into lessons: fixes to avoid (they failed or
-   only helped briefly), proven fixes, "similar symptoms, different cause" warnings, and recurrences.
+   only helped briefly), proven fixes, "similar symptoms, different cause" warnings, and recurrences. Between two
+   similar matches the more recent one ranks higher (a bonus of up to 0.05 that fades over 180 days).
 6. **Rank explanations.** Competing hypotheses are scored with a visible point-by-point breakdown. When the evidence
    is thin it reports "insufficient evidence" instead of guessing. Scores are rankings, not probabilities, until
    calibration has enough data (see below).
 7. **AI review (optional).** Groq, falling back to Gemini, then Ollama, assesses the hypotheses. Any evidence
    reference the AI invents is rejected. Read-only diagnostics (Docker, GitHub) can run here.
 8. **Plan.** Ordered steps: checks first, then mitigations and fixes. Every state-changing step is marked
-   `[needs approval]`, and fixes that failed before become warnings.
+   `[needs approval]`, and fixes that failed before become warnings. When the leading signature has a stack
+   trace, the root cause and the first step name the class and line (`ChargebackSyncJob.sync
+   (ChargebackSyncJob.java:92)`). Past fixes are restated without their old release numbers: rollbacks target
+   "the release before v2.58.0" (the release named in the alert or a recent deploy) or "the previous release".
+   Warnings are plain sentences; the UI adds its own heading.
 9. **Stream.** Memory events, then the explanation token by token, then one suggestion.
 10. **Learn on resolve.** The confirmed fix and failed attempts are stored, the engine's own prediction is graded,
     and a restart that only helped briefly is never recorded as the fix.
@@ -332,12 +337,17 @@ All settings are optional except at least one provider key. Defaults are in `.en
 | `AFTERMATH_MEMORY_PATH` | `.aftermath/memory.jsonl` | Local incident memory (empty = in-process only) |
 | `AFTERMATH_CALIBRATION_PATH` | `.aftermath/calibration.jsonl` | Graded predictions for calibration |
 | `AFTERMATH_CALIBRATION_MIN_SAMPLES` | `30` | Graded outcomes needed before confidence is a calibrated probability (15 for the demo seed) |
+| `AFTERMATH_REPORTS_DIR` | `reports/` next to the memory file | Saved full investigations and resolution evaluations (empty = RAM only) |
+| `AFTERMATH_REPORT_CACHE`, `AFTERMATH_REPORTS_MAX` | `50`, `500` | Reports kept in RAM / on disk (oldest files are pruned) |
+| `AFTERMATH_MAX_CONCURRENT_ANALYSES` | `4` | Analyses that run at once; more wait their turn (CPU and AI quota) |
+| `AFTERMATH_REDACT_EMAILS` | `0` | `1` also masks e-mail addresses (kept by default: they are often the evidence) |
 | `AFTERMATH_PACKS` | `all` | Domain packs to load: `all`, `none` or a list such as `security,network` |
 | `AFTERMATH_DOCKER_TOOLS`, `DOCKER_SOCKET` | `0`, `/var/run/docker.sock` | Read-only Docker diagnostics |
 | `GITHUB_REPO`, `AFTERMATH_SERVICE_REPOS`, `GITHUB_TOKEN` | empty | Commit and deploy correlation (`svc=owner/repo,...`); the token is optional for public repos |
 | `AFTERMATH_LIVE_TESTS` | `0` | `1` runs `tests/test_live_providers.py` against the real APIs |
 
-`.aftermath/` and `.env` are gitignored.
+`.aftermath/` and `.env` are gitignored. A numeric setting that isn't a number (or is below its minimum) logs a
+warning and falls back to the default instead of stopping the server.
 
 ### AI providers: what to know
 
@@ -356,8 +366,16 @@ All settings are optional except at least one provider key. Defaults are in `.en
 - `FileMemory` stores one record per resolved incident in `.aftermath/memory.jsonl`. Writes are atomic and the
   records survive restarts. Reports always say which memory backend was used. It is labelled `local_file` and never
   claims to be Hindsight.
-- **Hindsight:** a Hindsight adapter only needs `recall(query)` and `retain(record)`, the `IncidentMemory`
-  protocol in `memory.py`. Pass it as `RealAgent(settings, memory=...)`. It isn't built yet; the backend owns it.
+- **Restarts and history.** On every start the backend replays resolved incidents into memory. A record the memory
+  already holds is kept, so what was learned from a live resolution (the graded prediction) is never overwritten,
+  and new records are written in one batch. Free text in a record is capped (2,000 characters for the cause, fix
+  and notes; 20 failed attempts of 500 characters), so one oversized resolution can't bloat memory or a prompt.
+- **Full investigations** are saved per incident (`AFTERMATH_REPORTS_DIR`), so `GET /incidents/{id}/investigation`
+  and grading at resolve time work after a restart. A saved report is only served for an incident created before
+  it was produced, so ids reused by a fresh database never get another incident's report.
+- **Hindsight:** a Hindsight adapter only needs `recall(query)` and `retain(record)` (optionally `get(id)` and
+  `retain_many(records)`), the `IncidentMemory` protocol in `memory.py`. Pass it as `RealAgent(settings, memory=...)`.
+  It isn't built yet, and who builds it is still to be agreed.
 - **Calibration:** each resolve grades the prediction (correct, partially correct, incorrect). Seeding also
   backtests history: each resolved incident is replayed, oldest first, against memory holding only the incidents
   before it, and the top hypothesis is graded against the confirmed root cause (deterministic, no AI calls; a
@@ -365,9 +383,16 @@ All settings are optional except at least one provider key. Defaults are in `.en
   (default 30), `confidence` becomes an isotonic-calibrated probability, clamped to 5–95%, and the suggestion's
   `confidence_calibrated` is `true`. The frontend only shows a percentage, or "consensus", when it is `true`.
   The demo seed backtests 20 incidents, so set the threshold to 15 to see calibrated confidence in a demo.
-  With so few samples the top bucket can rest on a single incident, so treat demo percentages as illustrative.
+  With fewer than 30 graded outcomes the calibration report sets `illustrative: true` and the server logs a
+  warning at startup: the top bucket can rest on a single incident, so don't present those numbers as real.
 - **Root cause wording:** `likely_root_cause` states the cause without "Likely:" / "Possibly:", because engineers
-  save it as the confirmed cause. A tentative leading hypothesis adds a "Low certainty: …" warning instead.
+  save it as the confirmed cause. A tentative leading hypothesis adds a "Low certainty: …" warning instead (after
+  the SEV1 status-update reminder, which always comes first). `based_on` is exactly the list of recalled incidents
+  streamed as `memory` events.
+- **Structured extras.** `suggestion_fields()` also returns `origin_frame` and `warning_details` (each warning with
+  a `kind`: `severity`, `certainty`, `history`, `unsafe_history`, `contradiction`, `catalog`, `approval`, `memory`).
+  `RealAgent` sends them only once the backend's `Suggestion` model declares those fields, so it works with the
+  current contract and lights up when the backend adds them.
 
 ### Diagnostics connectors (read-only)
 
@@ -390,6 +415,24 @@ The pipeline is domain-neutral; packs add patterns and playbooks for other kinds
 | `kubernetes` | Image pull failure, unschedulable pods, node NotReady, evictions, quota exceeded |
 | `data_pipeline` | Consumer lag, schema drift, failed or late jobs, data-quality failures |
 | `industrial` | Overheating, vibration and bearings, pressure excursions, sensor dropout, PLC faults, power events, trips |
+| `healthcare` | EHR / clinical system downtime, dispensing cabinets, medical device faults, cold chain, lab interfaces, patient ID (operational guidance only, never clinical) |
+| `logistics` | Baggage and sortation jams, worn parts, warehouse / dispatch / check-in outages, crew scheduling, fleet tracking, reefer temperature, backlogs and delays |
+| `support` | Ticket surges, SLA breaches, complaint clusters, the product defect behind them, helpdesk / phone / chat outages |
+| `safety` | Defeated safety devices, missing segregation, ignored near misses, vehicle-pedestrian collisions, slips and falls, spills, lockout, PPE, injuries |
+
+**Written reports.** Hospitals, airlines, warehouses, support desks and safety teams usually describe incidents in
+prose, not log lines. `reports.py` recognises a written report (few log-shaped lines, report headings or full
+sentences) and turns it into events:
+- the date comes from the header ("Date: 7 November 2026") or the incident's creation time;
+- times are read from sentences ("At 02:10 …", "2:15 pm"), including a report that crosses midnight;
+- sections ("Summary", "Timeline", "Actions taken", "Impact", "Contributing factors") are kept on each event;
+- severity comes only from explicit wording ("fractured ankle" is critical, "stopped sorting" an error, "delayed" a
+  warning), and negations don't count ("no patient harm was identified").
+
+What people did ("Actions taken") is context, not a new failure, and its clock times aren't treated as failure times.
+When the report says fixing something restored service ("a worn drive belt was replaced and sorting resumed"), that
+cause gets a visible scoring bonus. Plans in these fields talk about harm, delays and safe return to use instead of
+error rates. Paste the report into an incident's logs field; nothing else changes.
 
 To add a pack, create a module in `aftermath_intelligence/packs/` that defines `PACK = Pack(...)` with
 `Signature`s (patterns, checks, mitigations, fixes, avoid, causes), register it in `packs/__init__.py`, and add
@@ -399,26 +442,40 @@ scenarios to `data/eval_scenarios.json`.
 
 - **Prompt injection.** Everything sent to an AI is wrapped in `<incident_data>` fences, and instructions inside
   logs are ignored (tested).
-- **Secrets.** These are redacted before any AI call or report:
-  - passwords, tokens and API keys;
-  - AWS, GitHub, GitLab, Slack and Stripe keys;
+- **Secrets.** These are redacted before any AI call or report, and the backend uses the same function before
+  storing incidents and resolutions:
+  - passwords, tokens and API keys, including prefixed variables (`DB_PASSWORD`, `PGPASSWORD`,
+    `MYSQL_ROOT_PASSWORD`, `spring.datasource.password`);
+  - AWS (access key ids, and secret keys on lines that mention AWS), GitHub, GitLab, Slack, Stripe, SendGrid,
+    Hugging Face, npm, PyPI, Twilio, DigitalOcean and Shopify keys;
   - JWTs and private keys;
-  - credentials in connection strings.
+  - credentials in connection strings and URLs (`redis://:pw@`, Azure `AccountKey=`, SAS `sig=`);
+  - payment card numbers (checksum-validated; numbers labelled as ids are kept).
 
-  A test asserts that none of them reach a provider request.
+  E-mail addresses (unless `AFTERMATH_REDACT_EMAILS=1`), hostnames and IPs are kept on purpose: they are often the
+  evidence. Every evidence item, signature snippet, timeline entry, error fingerprint and memory record is redacted
+  at the point it is built, so the full investigation report holds no credential either; fuzzing with secrets
+  mixed into malformed logs checks this. A test asserts that no secret reaches a provider request, and that
+  ordinary log lines come through unchanged.
+- **Poisoned memory.** Resolution text is typed by people and stored as written. If a past fix contains shell
+  commands (`curl … | sh`, `sudo`, `rm -rf`, `$(…)`) or instructions to the AI, it is never repeated as a step,
+  quoted in a warning or sent to the AI; the plan says to read the original incident instead.
 - **Approval.** State-changing steps always need human approval; fixes that failed before are blocked and shown as
   warnings.
 
 ### Tests and evaluation
 
 ```bash
-pytest                                      # 183 tests, no network or keys needed
-python scripts/evaluate_intelligence.py     # 20 scenarios across 6 fields
+pytest                                      # 295 tests, no network or keys needed
+python scripts/evaluate_intelligence.py     # 29 scenarios across 10 fields
 python scripts/check_providers.py [groq]    # live provider smoke test
 AFTERMATH_LIVE_TESTS=1 pytest tests/test_live_providers.py
 ```
 
-Current evaluation: 20/20 correct root causes, 20/20 categories, 14/14 symptoms, 0 unsafe steps. CI
+Current evaluation: 29/29 correct root causes, 29/29 categories, 23/23 symptoms, 0 unsafe steps (including four
+written reports: hospital EHR downtime, airline baggage, support surge, warehouse forklift). Scenarios can
+also check the stack frame the plan must name (Java, Python, Go and Node traces are covered), the detected release,
+text that must never appear (a planted `curl … | sh` fix, a stale release number) and steps that must appear. CI
 (`.github/workflows/ci.yml`) runs lint, tests and this evaluation on every PR, and fails if accuracy drops or any
 unsafe step appears. [`scripts/qa/`](scripts/qa/README.md) holds the black-box API, browser, UX and accessibility
 checks used in the November review; the evidence is in `docs/qa/`.
@@ -437,9 +494,23 @@ print(deterministic_narrative(report)); print(suggestion_fields(report))
 ```
 
 Pass `router=LLMRouter(LLMSettings.from_env())`, `memory=FileMemory(path)` and `tools=registry` to enable the AI,
-memory and diagnostics. `RealAgent.investigation(incident_id)` returns the full report as JSON for the planned
-`GET /incidents/{id}/investigation` endpoint (#12). The report includes the graph, the hypotheses with their score
-breakdowns, the evidence, the plan and a step-by-step replay.
+memory and diagnostics. `RealAgent.investigation(incident_id, created_at)` returns the full report as JSON for
+`GET /incidents/{id}/investigation` (#12). The report includes the graph, the hypotheses with their score
+breakdowns, the evidence, `origin_frame`, `current_version`, the plan and a step-by-step replay.
+
+### Performance
+
+- Parsing and signature matching run in a worker thread, so a large analysis never stalls the server: with 200 KB
+  of logs, `/health` answered in under 0.1 s throughout (it stalled for 1.3 s before). Saving reports also runs
+  off the event loop.
+- Plain-text signature patterns (144 of 319) use a substring check before any regex, and repeated log lines are
+  matched once. A maximum-size 200 KB analysis takes about 1.5 s of CPU; the demo alerts take about 10 ms.
+- Stress-tested: 40 simultaneous analyses (never more than 4 running), 300 analyses plus 120 oversized resolves
+  (about 20 MB of extra RAM, memory file under 1 MB, reports pruned to the limit), 5 restart cycles with no lost or
+  duplicated state, corrupted memory / calibration / report files, and AI providers returning 429, 500, garbage,
+  empty streams, connection errors or injected commands.
+- At most `AFTERMATH_MAX_CONCURRENT_ANALYSES` analyses run at once. Startup history ingest and calibration
+  backtests write their files once, not once per incident.
 
 ### Module map
 
@@ -459,5 +530,5 @@ They are kept for compatibility; new work should use `investigation.py`.
 ### Not done yet
 
 - **Hindsight memory adapter.** The interface exists; `FileMemory` stands in until the adapter is built.
-- **Full-investigation endpoint and UI.** The endpoint is #12 and the screen is #20; the data is already available.
+- **Full-investigation UI.** The endpoint exists (#12); the screen is #20.
 - **Calibrated confidence.** It needs about 30 real resolved incidents before scores become probabilities.

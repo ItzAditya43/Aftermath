@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
@@ -124,6 +125,9 @@ class RemediationPlan(BaseModel):
 
     steps: tuple[RemediationStep, ...]
     warnings: tuple[str, ...] = ()
+    # Parallel to `warnings`: severity | history | unsafe_history | contradiction | catalog. Lets a UI group or
+    # style them (e.g. history above generic advice) without parsing the text.
+    warning_kinds: tuple[str, ...] = ()
     blocked_actions: tuple[str, ...] = ()  # recommendations dropped because they failed before
 
 
@@ -135,14 +139,70 @@ _STATE_CHANGING = {
 }
 
 
+_ROLLBACK_TO_VERSION = re.compile(r"(?i)\b(roll(?:ed|ing|s)?[ -]?back\b[^;.,\n]{0,60}?)\s+to\s+v?\d+(?:\.\d+){1,3}(?:[-+][\w.]+)?\b")
+_DEPLOYED_VERSION = re.compile(r"(?i)\b(deployed|shipped|released|redeployed)\s+(?:([a-z0-9][\w.-]*)\s+)?v\d+(?:\.\d+){1,3}(?:[-+][\w.]+)?\b")
+_PREVIOUS_RELEASE = re.compile(r"(?i)\bthe previous release\b")
+
+
+SEV1_WARNING = "SEV1: post a status update before applying changes"
+# Fields where incidents are about people, equipment and operations rather than software services: plans speak
+# of harm, delays and safe return to use instead of error rates.
+OPERATIONS_CATEGORIES = frozenset({"healthcare_operations", "logistics_operations", "customer_support",
+                                   "workplace_safety", "physical_equipment"})
+
+
+def closing_step(category: str | None) -> str:
+    if category == "workplace_safety":
+        return "Confirm the failed controls are fixed and checked before the area or equipment goes back into use"
+    if category in OPERATIONS_CATEGORIES:
+        return "Confirm normal operations are back and stable before closing the incident"
+    return "Watch error rate and latency for 15 minutes before resolving"
+
+
+def short_frame(location: str) -> str:
+    """Drop the package: 'com.acme.billing.ChargebackSyncJob.sync (ChargebackSyncJob.java:92)' -> 'ChargebackSyncJob.sync (...)'."""
+    name, sep, where = location.partition(" (")
+    if "/" in name:   # Go: github.com/acme/ledger/internal/posting.(*Poster).Post -> posting.(*Poster).Post
+        name = name.rsplit("/", 1)[-1]
+    else:             # JVM / dotted: keep Class.method
+        parts = name.split(".")
+        name = ".".join(parts[-2:]) if len(parts) > 2 else name
+    return name + (sep + where if sep else "")
+
+
+def past_fix_summary(text: str, current_version: str | None = None, *, limit: int = 220) -> str:
+    """A past fix restated for the current incident: no stale release numbers, and short.
+
+    Release numbers from an old fix ("rolled back to v2.40.3") are wrong today; the rollback target is
+    restated against the current release ("the release before v2.58.0") or as "the previous release".
+    """
+    target = f"the release before {current_version}" if current_version else "the previous release"
+    text = _ROLLBACK_TO_VERSION.sub(lambda m: f"{m.group(1)} to {target}", text.strip())
+    text = _DEPLOYED_VERSION.sub(lambda m: f"{m.group(1)} a {m.group(2) + ' ' if m.group(2) else ''}release with that fix", text)
+    if len(text) <= limit:
+        return text
+    kept = ""
+    for clause in re.split(r";\s*", text):
+        candidate = f"{kept}; {clause}" if kept else clause
+        if len(candidate) > limit:
+            break
+        kept = candidate
+    return (kept or text[:limit].rsplit(" ", 1)[0]) + " …"
+
+
 def plan_remediation(hypotheses, *, lessons=(), service: str | None = None, severity: str | None = None,
-                     max_steps: int = 7) -> RemediationPlan:
+                     max_steps: int = 7, origin_frame: str | None = None,
+                     current_version: str | None = None) -> RemediationPlan:
     """Build an ordered plan from the leading hypotheses, the signature playbooks and memory lessons.
 
     Never executes anything. State-changing steps are marked `requires_approval`. Actions that
     failed or only gave temporary relief in similar past incidents are moved to warnings.
+
+    `origin_frame` is the application frame the leading hypothesis's stack trace points at; the plan starts
+    there. `current_version` is the release running now; rollback steps target the release before it.
+    Warnings are plain sentences (the UI adds its own heading).
     """
-    from .memory import ActionType, classify_action
+    from .memory import _ACTION_LABELS, ActionType, classify_action, unsafe_instruction
     from .rca import HypothesisState
     from .signatures import BY_ID
 
@@ -150,21 +210,33 @@ def plan_remediation(hypotheses, *, lessons=(), service: str | None = None, seve
     proven = [lesson for lesson in lessons if lesson.kind == "proven_fix"]
     steps: list[RemediationStep] = []
     warnings: list[str] = []
+    kinds: dict[str, str] = {}
+
+    def warn(text: str, kind: str) -> None:
+        warnings.append(text)
+        kinds.setdefault(text, kind)
     generic: list[str] = []          # catalog advice; ranked after this incident's own history
     blocked: list[str] = []
 
     def add(kind: RemediationKind, text: str, *, h=None, temporary=False, source="playbook", reason="",
-            expected="", verification="", rollback=None) -> None:
+            expected="", verification="", rollback=None, past_incident: str | None = None) -> None:
+        if current_version:
+            text = _PREVIOUS_RELEASE.sub(f"the release before {current_version}", text)
         if any(s.description == text for s in steps):
             return
         action = classify_action(text) if kind != RemediationKind.VERIFY else ActionType.WAIT
-        if source == "memory" and action in avoid:
-            warnings.append(f"\"{text[:120]}\" includes a {action.value.replace('_', ' ')} step; "
-                            f"on its own that did not hold before ({avoid[action].message[:120]})")
-        elif kind in {RemediationKind.MITIGATION, RemediationKind.ROOT_CAUSE_FIX} and action in avoid:
+        # "other" is not an action family: two unclassified actions have nothing in common, so an unrelated
+        # failed attempt must never block or taint a step. Those lessons still surface as warnings below.
+        matched = action in avoid and action != ActionType.OTHER
+        if source == "memory" and matched:
+            label = _ACTION_LABELS.get(action, action.value.replace("_", " ")).lower()
+            warn(f"The fix from {past_incident} also involved {label}, which did not hold on its own "
+                 f"before: {avoid[action].message}", "history")
+        elif kind in {RemediationKind.MITIGATION, RemediationKind.ROOT_CAUSE_FIX} and matched:
             lesson = avoid[action]
             blocked.append(text)
-            warnings.append(f"Skipped \"{text}\": {lesson.message}")
+            short = text if len(text) <= 80 else text[:80].rsplit(" ", 1)[0] + " …"
+            warn(f"{lesson.message}, so \"{short}\" was left out of the plan", "history")
             return
         risk = RiskLevel.READ_ONLY if kind in {RemediationKind.VERIFY, RemediationKind.INVESTIGATE} else _STATE_CHANGING.get(action.value, RiskLevel.MEDIUM)
         if kind in {RemediationKind.PREVENTIVE, RemediationKind.MONITORING}:
@@ -185,9 +257,18 @@ def plan_remediation(hypotheses, *, lessons=(), service: str | None = None, seve
         add(RemediationKind.INVESTIGATE, "Collect logs from the failing service starting 10 minutes before the alert", h=leader)
         add(RemediationKind.INVESTIGATE, "List deploys and configuration changes in the last 2 hours for the affected services", h=leader)
         add(RemediationKind.INVESTIGATE, "Check saturation metrics: CPU, memory, connections, queue depth", h=leader)
+    if leader is not None and origin_frame:
+        signature = BY_ID.get(leader.signature_id or "")
+        add(RemediationKind.VERIFY, f"Start at {short_frame(origin_frame)}: the stack trace for the "
+            f"{signature.label if signature else leader.title.lower()} points there", h=leader,
+            reason="First application frame in the stack trace of the leading signature")
     for h in active[:2]:
         signature = BY_ID.get(h.signature_id or "")
-        for check in (h.verification_steps or (signature.checks if signature else ()))[:2]:
+        checks = h.verification_steps or (signature.checks if signature else ())
+        if h is leader and origin_frame:
+            # The generic "find the code path in the stack trace" check is replaced by the named frame above.
+            checks = tuple(c for c in checks if "stack trace" not in c.lower())
+        for check in checks[:2]:
             add(RemediationKind.VERIFY, check, h=h, reason=f"Confirms or rules out: {h.title}")
         if h is not leader:
             continue
@@ -197,33 +278,51 @@ def plan_remediation(hypotheses, *, lessons=(), service: str | None = None, seve
                     expected="Temporary relief while the root cause is fixed")
             for fix in signature.fixes[:2]:
                 add(RemediationKind.ROOT_CAUSE_FIX, fix, h=h, expected="Removes the failure mechanism")
-            for note in signature.avoid:
-                generic.append(f"Avoid: {note}")
+            generic.extend(signature.avoid)
     for lesson in proven[:2]:
+        past = lesson.incident_ids[0]
         text = lesson.message.split(" was resolved by: ", 1)[-1]
-        add(RemediationKind.ROOT_CAUSE_FIX, f"Apply the fix that resolved {lesson.incident_ids[0]}: {text}", h=leader,
-            source="memory", reason=f"Verified fix for a similar incident ({lesson.incident_ids[0]})",
-            expected="Resolved the matching incident previously; confirm the same mechanism first")
+        if unsafe_instruction(text):
+            # Resolution text is typed by people and stored verbatim. Shell commands or instructions in it are
+            # never repeated as a step (they would read as a recommendation); the engineer reads the original.
+            add(RemediationKind.VERIFY, f"Read how {past} was fixed before reusing it (the recorded fix contains "
+                "commands or instructions, so it is not repeated here)", h=leader)
+            warn(f"The recorded fix for {past} contains shell commands or instructions. "
+                 "Check it by hand before reusing any of it.", "unsafe_history")
+            continue
+        add(RemediationKind.ROOT_CAUSE_FIX,
+            f"Reuse the fix from {past} if the same cause is confirmed: {past_fix_summary(text, current_version)}",
+            h=leader, source="memory", reason=f"Verified fix for a similar incident ({past})",
+            expected="Resolved the matching incident previously; confirm the same mechanism first", past_incident=past)
     if leader and leader.category.value != "unknown":
-        add(RemediationKind.MONITORING, f"Alert on the leading indicator for '{leader.title}' before it causes user-facing errors", h=leader)
+        if leader.category.value in OPERATIONS_CATEGORIES:
+            add(RemediationKind.MONITORING, f"Track early warnings for '{leader.title}' (near misses, alarms, slowdowns) "
+                "so the next one is caught before it causes harm or delay", h=leader)
+        else:
+            add(RemediationKind.MONITORING, f"Alert on the leading indicator for '{leader.title}' before it causes "
+                "user-facing errors", h=leader)
     # Every action that failed or only helped briefly in a similar incident is a warning, even when this
     # plan never proposed it: responders reach for restarts and scale-outs on their own.
     warned = {classify_action(text) for text in blocked}
     warned |= {action for action, lesson in avoid.items() if any(lesson.message[:60] in w for w in warnings)}
     for action, lesson in avoid.items():
         if action not in warned:
-            warnings.append(f"Avoid: {lesson.message}")
+            warn(lesson.message, "history")
     for lesson in lessons:
         if lesson.kind == "avoid_action" and lesson.action_type is None:
-            warnings.append(f"Avoid: {lesson.message}")
+            warn(lesson.message, "history")
     for lesson in lessons:
         if lesson.kind == "contradiction":
-            warnings.append(lesson.message)
-    warnings.extend(generic)
+            warn(lesson.message, "contradiction")
+    for note in generic:
+        warn(note, "catalog")
     if severity == "SEV1":
-        warnings.insert(0, "SEV1: post a status update before applying changes")
+        warnings.insert(0, SEV1_WARNING)
+        kinds.setdefault(SEV1_WARNING, "severity")
     order = [RemediationKind.VERIFY, RemediationKind.INVESTIGATE, RemediationKind.MITIGATION,
              RemediationKind.ROOT_CAUSE_FIX, RemediationKind.PREVENTIVE, RemediationKind.MONITORING]
     steps.sort(key=lambda s: order.index(s.kind))
     steps = [s.model_copy(update={"id": f"R{i + 1}"}) for i, s in enumerate(steps[:max_steps])]
-    return RemediationPlan(steps=tuple(steps), warnings=tuple(dict.fromkeys(warnings)), blocked_actions=tuple(blocked))
+    unique = tuple(dict.fromkeys(warnings))
+    return RemediationPlan(steps=tuple(steps), warnings=unique, warning_kinds=tuple(kinds[w] for w in unique),
+                           blocked_actions=tuple(blocked))

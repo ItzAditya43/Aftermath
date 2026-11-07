@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import type { SceneCamera, SceneMemory, ScenePoint, SceneNode } from "@/lib/memory-types";
-import { createServiceEdges, drawScene } from "./draw-scene";
+import { drawScene } from "./draw-scene";
 import { createSceneLayout, createWakeRanks, isCloserEligibleHit } from "./scene-layout";
 
 type Props = {
@@ -23,7 +23,6 @@ type Props = {
 type PointerDrag = { pointerId: number; x: number; y: number; moved: boolean };
 type SceneInputs = Pick<Props, "memories" | "selectedId" | "active" | "consensus" | "paused" | "reducedMotion"> & {
   layout: SceneNode[];
-  serviceEdges: ReturnType<typeof createServiceEdges>;
   wakeRanks: Map<string, number>;
   hoveredId: string | null;
   onSelect: Props["onSelect"];
@@ -128,7 +127,6 @@ export default function ConstellationCanvas(props: Props) {
     consensusSeen: false,
   });
   const layout = useMemo(() => createSceneLayout(props.memories), [props.memories]);
-  const serviceEdges = useMemo(() => createServiceEdges(props.memories), [props.memories]);
   const wakeRanks = useMemo(() => createWakeRanks(layout), [layout]);
   const [isDragging, setDragState] = useState(false);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -213,9 +211,9 @@ export default function ConstellationCanvas(props: Props) {
       runtime.consensusAt = null;
     }
     runtime.consensusSeen = props.consensus;
-    inputsRef.current = { ...props, layout, serviceEdges, wakeRanks, hoveredId };
+    inputsRef.current = { ...props, layout, wakeRanks, hoveredId };
     renderRef.current();
-  }, [props, layout, serviceEdges, wakeRanks, hoveredId]);
+  }, [props, layout, wakeRanks, hoveredId]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -250,7 +248,7 @@ export default function ConstellationCanvas(props: Props) {
       }
 
       context.setTransform(dpr, 0, 0, dpr, 0, 0);
-      positionsRef.current = drawScene(context, inputs.memories, inputs.layout, inputs.serviceEdges, {
+      positionsRef.current = drawScene(context, inputs.memories, inputs.layout, {
         elapsed: runtime.elapsed,
         introProgress: inputs.reducedMotion ? 1 : Math.min(1, runtime.elapsed / INTRO_DURATION_MS),
         width,
@@ -408,6 +406,8 @@ export default function ConstellationCanvas(props: Props) {
       {inspectionMemory && inspectionPlacement && typeof document !== "undefined" && createPortal(
         <section
           ref={inspectionCardRef}
+          tabIndex={0}
+          role="region"
           className={`memory-inspection-card ${props.selectedId === inspectionMemory.id ? "is-locked" : "is-preview"}`}
           style={{ left: inspectionPlacement.left, top: inspectionPlacement.top, width: inspectionPlacement.width, maxHeight: inspectionPlacement.maxHeight }}
           aria-label={`Memory inspection: ${inspectionMemory.title}`}
@@ -416,23 +416,25 @@ export default function ConstellationCanvas(props: Props) {
         >
           <div className="mb-2 flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="font-mono text-[8px] tracking-[0.1em] text-[#38BDF8]">ACTIVE INCIDENT · {props.activeIncidentId ?? "NONE"}</p>
-              <p className="mt-1 font-mono text-[9px] tracking-[0.14em] text-[#A855F7]">{inspectionMemory.id === props.activeIncidentId ? "ACTIVE INCIDENT MEMORY" : "HISTORICAL MEMORY"}</p>
-              <p className="font-mono text-[9px] tracking-[0.14em] text-[#FACC15]">{props.selectedId === inspectionMemory.id ? "LOCKED IN FOCUS" : "HOVER PREVIEW"}</p>
-              <p className="mt-1 break-all font-mono text-[10px] text-[#DDD6FE]">{inspectionMemory.id}</p>
+              <p className="font-mono text-[10.5px] uppercase tracking-[0.08em] text-[#8c8c95]">
+                {inspectionMemory.id === props.activeIncidentId ? "This incident" : inspectionMemory.recalled ? "Recalled from memory" : "Past incident"}
+                {" · "}
+                {props.selectedId === inspectionMemory.id ? "pinned" : "preview"}
+              </p>
+              <p className={`mt-1 break-all font-mono text-xs font-medium ${inspectionMemory.recalled ? "text-[#ffbf57]" : "text-[#f5f5f7]"}`}>{inspectionMemory.id}</p>
             </div>
             {props.selectedId === inspectionMemory.id && <button type="button" className="memory-inspection-clear" aria-label="Clear selected memory" onClick={() => props.onSelect(null)}>×</button>}
           </div>
-          <h2 className="break-words text-[13px] font-semibold leading-snug text-[#F4F0FF]">{inspectionMemory.title}</h2>
-          <p className="mt-1 break-words text-[11px] text-[#C4B5FD]">{inspectionMemory.service}</p>
-          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-[#38BDF8]">
-            {inspectionMemory.relevance != null && <span>MATCH {Math.round(inspectionMemory.relevance * 100)}%</span>}
-            {inspectionMemory.timeToResolveMinutes != null && <span>TTR {inspectionMemory.timeToResolveMinutes}m</span>}
+          <h2 className="break-words font-serif text-[19px] leading-snug text-[#f5f5f7]">{inspectionMemory.title}</h2>
+          <p className="mt-1 break-words font-mono text-xs text-[#cdcdd3]">{inspectionMemory.service}</p>
+          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-xs text-[#ffbf57]">
+            {inspectionMemory.relevance != null && <span>Match {Math.round(inspectionMemory.relevance * 100)}%</span>}
+            {inspectionMemory.timeToResolveMinutes != null && <span>Resolved in {inspectionMemory.timeToResolveMinutes} min</span>}
           </div>
-          {inspectionMemory.rootCause && <p className="mt-2 break-words text-[11px] leading-relaxed text-[#DDD6FE]"><b className="text-[#A855F7]">Root cause</b><br />{inspectionMemory.rootCause}</p>}
-          {inspectionMemory.failedAttempts.length > 0 && <div className="mt-2 break-words text-[11px] leading-relaxed text-[#FEF08A]"><b className="text-[#FACC15]">Prior attempts · did not resolve</b><ul className="mt-1 list-disc space-y-1 pl-4">{inspectionMemory.failedAttempts.map((attempt, index) => <li key={`${index}-${attempt}`}>{attempt}</li>)}</ul></div>}
-          {inspectionMemory.resolution && <p className="mt-2 break-words text-[11px] leading-relaxed text-[#FEF08A]"><b>Verified fix</b><br />{inspectionMemory.resolution}</p>}
-          {inspectionMemory.summary && <p className="mt-2 break-words border-t border-[#A855F7]/20 pt-2 text-[10px] leading-relaxed text-[#C4B5FD]"><b className="text-[#A855F7]">{inspectionMemory.recalled ? "Historical evidence" : "Incident context"}</b><br />{inspectionMemory.summary}</p>}
+          {inspectionMemory.rootCause && <p className="mt-2 break-words text-[13px] leading-relaxed text-[#cdcdd3]"><b className="font-medium text-[#f5f5f7]">Root cause</b><br />{inspectionMemory.rootCause}</p>}
+          {inspectionMemory.failedAttempts.length > 0 && <div className="mt-2 break-words text-[13px] leading-relaxed text-[#cdcdd3]"><b className="font-medium text-[#ff5a74]">Tried and failed</b><ul className="mt-1 list-disc space-y-1 pl-4">{inspectionMemory.failedAttempts.map((attempt, index) => <li key={`${index}-${attempt}`}>{attempt}</li>)}</ul></div>}
+          {inspectionMemory.resolution && <p className="mt-2 break-words text-[13px] leading-relaxed text-[#cdcdd3]"><b className="font-medium text-[#6fd69b]">Fix that worked</b><br />{inspectionMemory.resolution}</p>}
+          {inspectionMemory.summary && <p className="mt-2 break-words border-t border-[#3c3c44] pt-2 text-xs leading-relaxed text-[#8c8c95]"><b className="font-medium text-[#cdcdd3]">{inspectionMemory.recalled ? "Why it matched" : "Incident context"}</b><br />{inspectionMemory.summary}</p>}
         </section>,
         document.body,
       )}

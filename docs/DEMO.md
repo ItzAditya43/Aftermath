@@ -35,7 +35,7 @@ cd frontend && NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 | 1:40 | **Record resolution** with the real cause and "restarted pods, came back in 20 min" as what failed → **Save** | "When we close it, it learns the real fix and grades its own guess." |
 | 2:10 | Create the *api-gateway 502 after deploy* alert → **Analyze** | "Different incident, different chain: a deploy regression. It recalls the earlier 502 incidents and their rollbacks." |
 | 2:35 | Create the *search-api* alert → **Analyze** | "When evidence is thin it says 'possibly' with a low score instead of bluffing." |
-| 2:50 | Close | "Same engine works for security, network, Kubernetes, data pipelines and factory equipment — only the pattern pack changes." |
+| 2:50 | Close | "Same engine works for security, network, Kubernetes, data pipelines, factory equipment — and written reports from hospitals, airlines, support desks and safety teams. Only the pattern pack changes." |
 
 ## If something goes wrong
 
@@ -52,5 +52,7 @@ cd frontend && NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
   instructions hidden in logs are ignored (tested).
 - *Does it learn?* Yes: every resolution is stored with what failed and what worked, and predictions are graded.
   After 30 graded outcomes the confidence becomes a calibrated probability.
-- *Other industries?* Packs for security, network, Kubernetes, data pipelines and industrial equipment ship today
-  (`AFTERMATH_PACKS`), each with evaluated scenarios.
+- *Other industries?* Packs for security, network, Kubernetes, data pipelines, industrial equipment, healthcare
+  operations, logistics/airlines, customer support and workplace safety ship today. The last four read written
+  reports: paste a shift or safety report into the logs field. Packs are chosen with `AFTERMATH_PACKS`, and each
+  has evaluated scenarios.

@@ -115,18 +115,20 @@ def generate_hypotheses(*, service: str, matches: Iterable[SignatureMatch], chai
         affected = match.services[0] if match.services else service
         if signature.role == Role.CHANGE:
             title = f"Regression introduced by a {signature.label}"
-            description = (f"A {signature.label} preceded the failure; the change may have introduced "
-                           f"{_join([by_id[r].signature.label for r in chain.root_candidates if r in by_id]) or 'the failure'}.")
+            introduced = _join([by_id[r].signature.label for r in chain.root_candidates if r in by_id])
+            description = (f"A {signature.label} preceded the failure and may have introduced "
+                           f"{introduced or 'it'}.")
         elif signature.role == Role.MECHANISM:
-            title = f"{signature.label.capitalize()} on {affected}"
-            description = (f"{signature.label.capitalize()} is observed and explains "
-                           f"{_join([by_id[e].signature.label for e in explained]) or 'the symptoms'}; "
-                           "what drove it there is not yet identified.")
+            title = f"{_upper_first(signature.label)} on {affected}"
+            effects = _join([by_id[e].signature.label for e in explained])
+            description = (f"{_upper_first(signature.label)} on {affected}"
+                           + (f", causing {effects}" if effects else "")
+                           + "; what drove it there is not identified yet.")
         else:
-            title = f"{signature.label.capitalize()} in {affected}"
-            description = (f"{signature.label.capitalize()} is observed"
-                           + (f" and is a known cause of {_join([by_id[e].signature.label for e in explained])}" if explained else "")
-                           + ".")
+            title = f"{_upper_first(signature.label)} in {affected}"
+            effects = _join([by_id[e].signature.label for e in explained])
+            description = (f"{_upper_first(signature.label)} in {affected}"
+                           + (f", which leads to {effects}" if effects else "") + ".")
         h = Hypothesis(id=hypothesis_id(f"sig:{sig_id}"), title=title, description=description,
                        category=signature.category, affected_service=affected, signature_id=sig_id,
                        supporting_evidence_ids=tuple(dict.fromkeys(supporting)), score=0.0,
@@ -145,6 +147,8 @@ def generate_hypotheses(*, service: str, matches: Iterable[SignatureMatch], chai
                 h = h.adjusted("temporal_precedence", 0.08, "earliest failure signal in the timeline")
             elif lag > 120 and explained:
                 h = h.adjusted("temporal_precedence", -0.1, f"first seen {int(lag)}s after the earliest failure")
+        if match.named_fix and signature.role in {Role.ORIGIN, Role.MECHANISM, Role.CONTRIBUTOR}:
+            h = h.adjusted("named_as_fix", 0.12, "the report says fixing this resolved the incident")
         if signature.role == Role.ORIGIN and _has_app_origin_frame(ledger, match.event_ids):
             h = h.adjusted("stack_origin", 0.05, "stack trace points at an application frame")
         if signature.role == Role.CHANGE and not chain.root_candidates:
@@ -298,6 +302,11 @@ def _has_app_origin_frame(ledger: EvidenceLedger, event_ids: tuple[str, ...]) ->
             if item.attributes.get("origin_frame"):
                 return True
     return False
+
+
+def _upper_first(text: str) -> str:
+    """Capitalise the first letter only: str.capitalize() would turn "EHR downtime" into "Ehr downtime"."""
+    return text[:1].upper() + text[1:]
 
 
 def _join(items: list[str]) -> str:

@@ -26,11 +26,13 @@ AFTERMATH_MAX_LLM_CALLS, AFTERMATH_INVESTIGATION_SECONDS.
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
-from collections import OrderedDict
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
+from pathlib import Path
 
 from aftermath_intelligence.calibration import CalibrationTracker, GradedPrediction
 from aftermath_intelligence.connectors import Connectors, connectors_from_env
@@ -42,14 +44,13 @@ from aftermath_intelligence.memory import IncidentMemory, InProcessMemory, build
 from aftermath_intelligence.presentation import deterministic_narrative, narrative_context, suggestion_fields
 from aftermath_intelligence.prompts import NARRATIVE_SYSTEM, narrative_prompt
 from aftermath_intelligence.resolution import ResolutionStatus
-from aftermath_intelligence.store import FileMemory, PersistentCalibration
+from aftermath_intelligence.store import FileMemory, PersistentCalibration, ReportStore
 from aftermath_intelligence.tools import ToolAdapter
 from app.agent.interface import AgentEvent, IncidentContext, MemoryEvent, ResolutionContext, SuggestionEvent, TokenEvent
 from app.config import Settings
 
 logger = logging.getLogger("aftermath.agent")
 
-_MAX_REPORTS = 200
 
 
 class RealAgent:
@@ -67,21 +68,36 @@ class RealAgent:
         self.connectors = connectors_from_env() if tools is None else Connectors(registry=None)
         tools = tools if tools is not None else self.connectors.registry
         self.limits = limits or InvestigationLimits(
-            max_llm_calls=int(os.getenv("AFTERMATH_MAX_LLM_CALLS", "3")),
-            max_seconds=float(os.getenv("AFTERMATH_INVESTIGATION_SECONDS", "20")),
+            max_llm_calls=_env_number("AFTERMATH_MAX_LLM_CALLS", 3, int, minimum=0),
+            max_seconds=_env_number("AFTERMATH_INVESTIGATION_SECONDS", 20, float),
         )
-        self.narrative_first_token_seconds = float(os.getenv("AFTERMATH_NARRATIVE_FIRST_TOKEN_SECONDS", "8"))
-        self.narrative_total_seconds = float(os.getenv("AFTERMATH_NARRATIVE_SECONDS", "25"))
+        self.narrative_first_token_seconds = _env_number("AFTERMATH_NARRATIVE_FIRST_TOKEN_SECONDS", 8, float)
+        self.narrative_total_seconds = _env_number("AFTERMATH_NARRATIVE_SECONDS", 25, float)
         self.engine = InvestigationEngine(router=router, memory=self.memory, tools=tools, limits=self.limits)
         self.stream_narrative = stream_narrative
         calibration_path = os.getenv("AFTERMATH_CALIBRATION_PATH", ".aftermath/calibration.jsonl")
-        min_samples = int(os.getenv("AFTERMATH_CALIBRATION_MIN_SAMPLES", "30"))
+        min_samples = _env_number("AFTERMATH_CALIBRATION_MIN_SAMPLES", 30, int)
+        if min_samples < 30:
+            logger.warning("AFTERMATH_CALIBRATION_MIN_SAMPLES=%d: calibrated percentages rest on fewer than 30 graded "
+                           "outcomes and are illustrative only (fine for a demo, not for production)", min_samples)
         self.calibration: CalibrationTracker = (
             PersistentCalibration(calibration_path, min_samples=min_samples) if calibration_path
             else CalibrationTracker(min_samples=min_samples))
         # Latest structured report per incident, for richer API endpoints and for grading at resolve time.
-        self.reports: OrderedDict[str, InvestigationReport] = OrderedDict()
-        self.evaluations: OrderedDict[str, ResolutionEvaluation] = OrderedDict()
+        # Full reports back the investigation endpoint and grading at resolve time. The newest are kept in RAM,
+        # all of them on disk (AFTERMATH_REPORTS_DIR; empty = RAM only) so they survive restarts.
+        # Default: a "reports" folder next to the memory file, so state that belongs together moves together.
+        default_dir = str(Path(memory_path).parent / "reports") if memory_path else ""
+        reports_dir = os.getenv("AFTERMATH_REPORTS_DIR", default_dir) or None
+        cache = _env_number("AFTERMATH_REPORT_CACHE", 50, int)
+        keep = _env_number("AFTERMATH_REPORTS_MAX", 500, int)
+        self.reports: ReportStore[InvestigationReport] = ReportStore(
+            InvestigationReport, reports_dir, suffix="report", cache_size=cache, max_files=keep)
+        self.evaluations: ReportStore[ResolutionEvaluation] = ReportStore(
+            ResolutionEvaluation, reports_dir, suffix="evaluation", cache_size=cache, max_files=keep)
+        # Each analysis takes CPU (parsing, matching) and AI quota; bound how many run at once. Extra
+        # requests wait their turn instead of all competing for the same rate-limited provider.
+        self._analysis_slots = asyncio.Semaphore(_env_number("AFTERMATH_MAX_CONCURRENT_ANALYSES", 4, int))
         logger.info("RealAgent ready: providers=%s memory=%s", router.describe(), self.memory.backend)
 
     # ------------------------------------------------------------------ AgentService
@@ -90,8 +106,9 @@ class RealAgent:
         changes = ()
         if self.connectors.github is not None:
             changes = await self.connectors.github.recent_changes(incident.service, until=incident.created_at)
-        report = await self.engine.run(_case(incident, changes))
-        self._remember(self.reports, incident.id, report)
+        async with self._analysis_slots:
+            report = await self.engine.run(_case(incident, changes))
+        await asyncio.to_thread(self.reports.put, incident.id, report)   # JSON + fsync off the event loop
 
         for item in report.recalled_incidents:
             record = item.record
@@ -107,6 +124,9 @@ class RealAgent:
             yield TokenEvent(text=chunk)
 
         fields = suggestion_fields(report)
+        # Forward-compatible: structured extras (warning_details, origin_frame) are sent only when the backend's
+        # Suggestion model declares them; until then the plain fields carry the same information.
+        fields = {k: v for k, v in fields.items() if k in SuggestionEvent.model_fields}
         calibrated = self.calibration.calibrate(report.top_score)
         if calibrated is not None:
             fields["confidence"] = calibrated
@@ -115,8 +135,9 @@ class RealAgent:
         yield SuggestionEvent(**fields)
 
     async def learn_from_resolution(self, incident: IncidentContext, resolution: ResolutionContext) -> None:
-        events = ingest_text(incident.logs, incident_id=incident.id, source="logs", default_service=incident.service).events
-        report = self.reports.get(incident.id)
+        events = ingest_text(incident.logs, incident_id=incident.id, source="logs", default_service=incident.service,
+                             reference=incident.created_at).events
+        report = self._report_for(incident.id, incident.created_at)
         evaluation = evaluate_resolution_report(
             incident_id=incident.id, title=incident.title, service=incident.service, alert_text=incident.alert_text,
             events=events, root_cause=resolution.root_cause, fix_that_worked=resolution.fix_that_worked,
@@ -126,7 +147,7 @@ class RealAgent:
             severity=incident.severity, created_at=incident.created_at, resolved_at=incident.resolved_at,
         )
         await self.memory.retain(evaluation.memory_record)
-        self._remember(self.evaluations, incident.id, evaluation)
+        await asyncio.to_thread(self.evaluations.put, incident.id, evaluation)
         if report is not None:
             self.calibration.record(GradedPrediction(incident.id, report.top_score, evaluation.prediction.verdict,
                                                      evaluation.prediction.rank_of_actual))
@@ -134,12 +155,23 @@ class RealAgent:
                     evaluation.prediction.verdict)
 
     async def ingest_history(self, incidents: list[IncidentContext]) -> None:
+        """Load resolved incidents into memory. Runs on seeding and on every server start.
+
+        A record the memory already holds is kept as it is: one learned from a live resolution carries the
+        engine's graded prediction and outcome analysis, which a rebuild from the database row would lose.
+        New records are written in one batch (one file write instead of one per incident).
+        """
         resolved = sorted((i for i in incidents if i.status == "resolved" and i.root_cause),
-                          key=lambda i: i.created_at)
-        records = []
+                          key=lambda i: _aware(i.created_at))
+        get = getattr(self.memory, "get", None)
+        records, new = [], []
         for incident in resolved:
+            existing = get(incident.id) if callable(get) else None
+            if existing is not None:
+                records.append(existing)
+                continue
             events = ingest_text(incident.logs, incident_id=incident.id, source="logs",
-                                 default_service=incident.service).events
+                                 default_service=incident.service, reference=incident.created_at).events
             record = build_memory_record(
                 incident_id=incident.id, title=incident.title, service=incident.service,
                 alert_text=incident.alert_text, events=events, root_cause=incident.root_cause,
@@ -148,7 +180,15 @@ class RealAgent:
                 notes=incident.notes,
             )
             records.append(record)
-            await self.memory.retain(record)
+            new.append(record)
+        retain_many = getattr(self.memory, "retain_many", None)
+        if callable(retain_many):
+            await retain_many(new)
+        else:
+            for record in new:
+                await self.memory.retain(record)
+        if new:
+            logger.info("memory: %d new historical incident(s), %d already known", len(new), len(records) - len(new))
         await self._backtest(resolved, records)
 
     async def _backtest(self, incidents: list[IncidentContext], records: list) -> None:
@@ -163,18 +203,20 @@ class RealAgent:
         engine = InvestigationEngine(memory=earlier, limits=InvestigationLimits(max_llm_calls=0,
                                                                                  max_seconds=self.limits.max_seconds))
         graded = 0
-        for incident, record in zip(incidents, records, strict=True):
-            if incident.id not in self.calibration:
-                try:
-                    report = await engine.run(_case(incident))
-                except Exception:  # noqa: BLE001 - one bad historical record must not abort seeding
-                    logger.warning("backtest of %s failed; skipping", incident.id, exc_info=True)
-                else:
-                    grade = grade_prediction(report.hypotheses, incident.root_cause)
-                    self.calibration.record(GradedPrediction(incident.id, report.top_score, grade.verdict,
-                                                             grade.rank_of_actual))
-                    graded += 1
-            await earlier.retain(record)
+        batch = getattr(self.calibration, "batch", None)
+        with batch() if callable(batch) else contextlib.nullcontext():   # one calibration write, not one per grade
+            for incident, record in zip(incidents, records, strict=True):
+                if incident.id not in self.calibration:
+                    try:
+                        report = await engine.run(_case(incident))
+                    except Exception:  # noqa: BLE001 - one bad historical record must not abort seeding
+                        logger.warning("backtest of %s failed; skipping", incident.id, exc_info=True)
+                    else:
+                        grade = grade_prediction(report.hypotheses, incident.root_cause)
+                        self.calibration.record(GradedPrediction(incident.id, report.top_score, grade.verdict,
+                                                                 grade.rank_of_actual))
+                        graded += 1
+                await earlier.retain(record)
         if graded:
             logger.info("backtested %d historical incident(s); %s", graded, self.calibration.report().note)
 
@@ -186,14 +228,27 @@ class RealAgent:
         self.evaluations.clear()
         self.calibration.clear()
 
-    def investigation(self, incident_id: str) -> dict | None:
+    def _report_for(self, incident_id: str, created_at: datetime | None) -> InvestigationReport | None:
+        """The saved report for this incident, if it was produced for *this* incident.
+
+        Ids restart at INC-1021 with a fresh database while saved reports can outlive it; a report from before
+        the incident existed belongs to an older incident with the same id and is never served or graded.
+        """
+        report = self.reports.get(incident_id)
+        if report is not None and created_at is not None and _aware(report.started_at) < _aware(created_at):
+            return None
+        return report
+
+    def investigation(self, incident_id: str, created_at: datetime | None = None) -> dict | None:
         """The latest full investigation for an incident as JSON-safe data, or None if not analysed yet.
 
         Contains the failure chain and causal graph, every ranked hypothesis with its score breakdown,
         evidence, anomalies, recalled incidents and lessons, the remediation plan and a step-by-step replay.
         Evidence is already redacted. Intended for a `GET /incidents/{id}/investigation` endpoint.
+        Pass the incident's `created_at` so a saved report from an older incident with the same id is never
+        returned (ids restart when the database is recreated).
         """
-        report = self.reports.get(incident_id)
+        report = self._report_for(incident_id, created_at)
         if report is None:
             return None
         data = report.model_dump(mode="json")
@@ -252,12 +307,27 @@ class RealAgent:
         for token in _tokens(deterministic_narrative(report)):
             yield token
 
-    @staticmethod
-    def _remember(store: OrderedDict, key: str, value) -> None:
-        store[key] = value
-        store.move_to_end(key)
-        while len(store) > _MAX_REPORTS:
-            store.popitem(last=False)
+
+def _env_number(name: str, default, kind=int, *, minimum=1):
+    """Numeric setting from the environment. A typo or a value below `minimum` logs a warning and uses the
+    default, instead of crashing startup with a bare ValueError or silently disabling a limit."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = kind(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; using %s", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning("%s=%r must be at least %s; using %s", name, raw, minimum, default)
+        return default
+    return value
+
+
+def _aware(value: datetime) -> datetime:
+    """SQLite hands back naive datetimes and seeds are UTC-aware; sorting a mix of both raises TypeError."""
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def _case(incident: IncidentContext, changes=()) -> IncidentCase:

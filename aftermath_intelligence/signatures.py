@@ -35,6 +35,10 @@ class Category(StrEnum):
     SECURITY = "security"
     DATA_PIPELINE = "data_pipeline"
     EQUIPMENT = "physical_equipment"
+    HEALTHCARE = "healthcare_operations"
+    LOGISTICS = "logistics_operations"
+    CUSTOMER_SUPPORT = "customer_support"
+    SAFETY = "workplace_safety"
     UNKNOWN = "unknown"
 
 
@@ -62,16 +66,36 @@ class Signature:
     causes: tuple[str, ...] = ()          # signature ids this one commonly leads to
     tool_hints: tuple[str, ...] = ()      # capability keywords for the diagnostic planner
     _compiled: tuple[re.Pattern[str], ...] = field(default=(), compare=False, repr=False)
+    _literals: tuple[tuple[str, re.Pattern[str]], ...] = field(default=(), compare=False, repr=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_compiled", tuple(re.compile(p, re.I) for p in self.patterns))
+        # Plain-text patterns (almost half the catalog) are pre-checked with a substring test on the lowered
+        # text, which is far cheaper than a regex scan; the regex only runs to locate an actual hit.
+        object.__setattr__(self, "_literals", tuple((p.lower(), re.compile(re.escape(p), re.I))
+                                                    for p in self.patterns if _is_literal(p)))
+        object.__setattr__(self, "_compiled", tuple(re.compile(p, re.I) for p in self.patterns if not _is_literal(p)))
 
-    def search(self, text: str) -> re.Match[str] | None:
+    def search(self, text: str, lowered: str | None = None) -> re.Match[str] | None:
+        """First match of any pattern. Pass `lowered` (text.lower()) when matching many signatures on one text."""
+        if self._literals:
+            lowered = text.lower() if lowered is None else lowered
+            for literal, pattern in self._literals:
+                if literal in lowered:
+                    match = pattern.search(text)
+                    if match:
+                        return match
         for pattern in self._compiled:
             match = pattern.search(text)
             if match:
                 return match
         return None
+
+
+_REGEX_META = frozenset("\\.^$*+?{}[]|()")
+
+
+def _is_literal(pattern: str) -> bool:
+    return not any(ch in _REGEX_META for ch in pattern)
 
 
 CORE_CATALOG: tuple[Signature, ...] = (
@@ -84,8 +108,8 @@ CORE_CATALOG: tuple[Signature, ...] = (
         mitigations=("Restart the affected instances to release leaked connections (relief only; the leak will refill the pool)",),
         fixes=("Close connections in a finally / try-with-resources / context manager on every path",
                "Enable leak detection (e.g. Hikari leakDetectionThreshold) in production to catch regressions"),
-        avoid=("Raising the pool size only delays exhaustion when connections are leaking",
-               "Scaling out replicas multiplies leaked connections against the database limit"),
+        avoid=("Don't raise the pool size: with a leak it only delays exhaustion",
+               "Don't scale out replicas: each one leaks connections against the same database limit"),
         causes=("connection_pool_exhausted", "db_too_many_connections"),
         tool_hints=("logs", "github", "commit", "code"),
     ),
@@ -100,7 +124,7 @@ CORE_CATALOG: tuple[Signature, ...] = (
                      "Pause the batch job or traffic source holding connections"),
         fixes=("Fix whatever holds connections too long (leak, long transaction, slow query)",
                "Size the pool from measured concurrency, below the database connection limit"),
-        avoid=("Increasing pool size or replicas without finding the holder",),
+        avoid=("Don't add pool size or replicas before finding what holds the connections",),
         causes=("upstream_timeout", "bad_gateway", "liveness_probe_failed"),
         tool_hints=("database", "metrics", "logs", "container"),
     ),
@@ -123,7 +147,7 @@ CORE_CATALOG: tuple[Signature, ...] = (
         mitigations=("Cap or restart the client holding the most connections",),
         fixes=("Put a connection pooler (e.g. PgBouncer) in front of the database",
                "Limit per-worker connections in the offending client"),
-        avoid=("Raising max_connections without addressing the client (memory cost; needs a DB restart)",),
+        avoid=("Don't raise max_connections without fixing the client: it costs memory and needs a DB restart",),
         causes=("connection_pool_exhausted", "upstream_timeout"),
         tool_hints=("database", "metrics"),
     ),
@@ -135,7 +159,7 @@ CORE_CATALOG: tuple[Signature, ...] = (
         mitigations=("Cancel the blocking session if it is safe to do so",),
         fixes=("Run schema changes with non-blocking variants (CREATE INDEX CONCURRENTLY, expand/contract migrations)",
                "Set lock_timeout on migrations so they fail fast instead of blocking traffic"),
-        avoid=("Restarting application pods: new queries queue behind the same lock",),
+        avoid=("Don't restart application pods: new queries queue behind the same lock",),
         causes=("upstream_timeout", "connection_pool_exhausted"),
         tool_hints=("database", "logs"),
     ),
@@ -167,7 +191,7 @@ CORE_CATALOG: tuple[Signature, ...] = (
         mitigations=("Raise the memory limit temporarily while the cause is found",),
         fixes=("Stream or chunk large workloads instead of loading them into memory",
                "Fix unbounded caches / collections"),
-        avoid=("Restarting or adding replicas when one job's memory use is the cause: each replica OOMs the same way",),
+        avoid=("Don't restart or add replicas when one job's memory use is the cause: each replica runs out of memory the same way",),
         causes=("crash_loop", "liveness_probe_failed", "bad_gateway"),
         tool_hints=("container", "metrics", "docker", "resource"),
     ),
@@ -181,7 +205,7 @@ CORE_CATALOG: tuple[Signature, ...] = (
         mitigations=("Raise the heap / memory limit temporarily while the cause is found",),
         fixes=("Stream or chunk large workloads instead of loading them into memory",
                "Fix unbounded caches / collections"),
-        avoid=("Restarting only resets the heap; the same workload fills it again",),
+        avoid=("Don't rely on a restart: it only resets the heap, and the same workload fills it again",),
         causes=("oom_killed", "crash_loop", "upstream_timeout"),
         tool_hints=("metrics", "logs", "resource"),
     ),
@@ -238,7 +262,7 @@ CORE_CATALOG: tuple[Signature, ...] = (
         checks=("Compare the proxy's upstream idle timeout with the upstream server's keep-alive timeout (proxy must be lower)",),
         mitigations=("Roll back the configuration change that altered the timeout",),
         fixes=("Set proxy idle timeout below upstream keep-alive and add a config test that asserts it",),
-        avoid=("Restarting gateway pods: the mismatch returns as soon as connections idle",),
+        avoid=("Don't restart gateway pods: the timeout mismatch returns as soon as connections go idle",),
         causes=("bad_gateway",),
         tool_hints=("github", "deployment", "config"),
     ),
@@ -258,7 +282,7 @@ CORE_CATALOG: tuple[Signature, ...] = (
         checks=("Check certificate expiry dates on the endpoint and the renewal job's logs",),
         mitigations=("Manually issue and install a valid certificate",),
         fixes=("Fix automated renewal and alert on certificates expiring within 14 days",),
-        avoid=("Restarting the renewal controller without fixing why renewal fails",),
+        avoid=("Don't just restart the renewal controller: find out why renewal fails first",),
         tool_hints=("config", "logs"),
     ),
     Signature(
@@ -268,7 +292,7 @@ CORE_CATALOG: tuple[Signature, ...] = (
         checks=("Compare the token's kid with the keys currently served by the JWKS endpoint",),
         mitigations=("Refresh verifier JWKS caches", "Re-sign with the previous key until the new key is published"),
         fixes=("Publish new keys well before signing with them (pre-publication window)",),
-        avoid=("Restarting verifiers if the new key is still not published",),
+        avoid=("Don't restart verifiers while the new key is still unpublished",),
         causes=("auth_failure",),
         tool_hints=("config", "logs"),
     ),
@@ -285,7 +309,7 @@ CORE_CATALOG: tuple[Signature, ...] = (
         checks=("Verify the configured signing secret matches the provider dashboard",),
         mitigations=("Update the signing secret and replay failed webhook deliveries",),
         fixes=("Manage provider secrets through the secret store with rotation runbooks",),
-        avoid=("Redeploying with the same configuration",),
+        avoid=("Don't redeploy with the same configuration",),
         tool_hints=("config",),
     ),
     Signature(
@@ -302,7 +326,7 @@ CORE_CATALOG: tuple[Signature, ...] = (
         checks=("Find the caller issuing the blocking command (endpoint, job)",),
         mitigations=("Disable the endpoint/job issuing the command",),
         fixes=("Replace KEYS with SCAN / maintain an index set",),
-        avoid=("Failing over to a replica: the same command blocks it too",),
+        avoid=("Don't fail over to a replica: the same command will block it too",),
         causes=("redis_latency",),
         tool_hints=("github", "code", "logs"),
     ),
@@ -403,6 +427,7 @@ class SignatureMatch:
     last_seen: datetime | None
     services: tuple[str, ...]
     snippet: str
+    named_fix: bool = False   # a written report says fixing this resolved the incident
 
     @property
     def id(self) -> str:
@@ -417,12 +442,21 @@ def match_signatures(events: Iterable[NormalizedEvent], *, extra_text: dict[str,
     signals that appear only in the alert are still counted, with honest provenance.
     """
     hits: dict[str, list[tuple[NormalizedEvent | None, str, str]]] = defaultdict(list)
+    seen: dict[str, list[tuple[str, str]]] = {}  # repeated log text (retry loops, crash loops) is scanned once
     for event in events:
         text = "\n".join(filter(None, (event.message, event.stack_trace, event.raw if event.raw != event.message else None)))
-        for signature in catalog:
-            match = signature.search(text)
-            if match:
-                hits[signature.id].append((event, event.event_id, _snippet(text, match)))
+        found = seen.get(text)
+        if found is None:
+            found = []
+            lowered = text.lower()
+            for signature in catalog:
+                match = signature.search(text, lowered)
+                if match:
+                    found.append((signature.id, _snippet(text, match)))
+            if len(seen) < 20_000:
+                seen[text] = found
+        for sig_id, snippet in found:
+            hits[sig_id].append((event, event.event_id, snippet))
     for pseudo_id, text in (extra_text or {}).items():
         for signature in catalog:
             match = signature.search(text)
@@ -439,11 +473,20 @@ def match_signatures(events: Iterable[NormalizedEvent], *, extra_text: dict[str,
             last_seen=max(stamps) if stamps else None,
             services=tuple(sorted({e.service for e, _, _ in items if e is not None and e.service})),
             snippet=items[0][2],
+            named_fix=any(e is not None and e.metadata.get("named_fix") for e, _, _ in items),
         ))
     return tuple(sorted(output, key=lambda m: (m.first_seen is None, m.first_seen or datetime.max, -m.count)))
 
 
 def _snippet(text: str, match: re.Match[str], radius: int = 60) -> str:
+    """The matched line fragment, redacted. The window is widened to whole words first so a credential at its
+    edge is never cut into a fragment too short for the redaction patterns to recognise."""
+    from .redaction import redact_sensitive_text
+
     start = max(0, match.start() - radius)
     end = min(len(text), match.end() + radius)
-    return re.sub(r"\s+", " ", text[start:end]).strip()[:200]
+    while start > 0 and not text[start - 1].isspace() and match.start() - start < radius + 200:
+        start -= 1
+    while end < len(text) and not text[end].isspace() and end - match.end() < radius + 200:
+        end += 1
+    return re.sub(r"\s+", " ", redact_sensitive_text(text[start:end])).strip()[:200]
