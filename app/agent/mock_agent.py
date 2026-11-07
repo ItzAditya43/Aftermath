@@ -294,7 +294,7 @@ class MockAgent:
         steps += _split_steps(past.resolution or "")
         steps.append("Watch error rate and latency for 15 minutes before resolving")
 
-        warnings = [f"Avoid: {_clean(a)}. It did not work in {m.entry.incident.id}"
+        warnings = [f"{_clean(a)} did not work in {m.entry.incident.id}"
                     for m in matches for a in m.entry.incident.failed_attempts][:4]
         if incident.severity == "SEV1":
             warnings.append("SEV1: post a status update before applying changes")

@@ -87,7 +87,7 @@ def test_learning_loop_resolved_incident_is_recalled_next_time(client, make_inci
     events = analyze(second["id"])
     memory_ids = [d["past_incident_id"] for n, d in events if n == "memory"]
     assert memory_ids == [first["id"]]
-    assert "Avoid: Restarted pods" in events[-2][1]["warnings"][0]
+    assert events[-2][1]["warnings"][0].startswith("Restarted pods did not work in INC-")
 
 
 def test_analyze_unknown_incident_404_json(client):
