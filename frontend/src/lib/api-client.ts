@@ -1,8 +1,10 @@
 import type {
   AnalysisEvent,
   CreateIncidentRequest,
+  HealthResponse,
   IncidentDetail,
   IncidentSummary,
+  InvestigationReport,
   MemoryReference,
   ResolveResponse,
   ResolveIncidentRequest,
@@ -99,8 +101,16 @@ export function getIncidentMemories(id: string, signal?: AbortSignal): Promise<M
   return request<MemoryReference[]>(`/incidents/${encodeURIComponent(id)}/memories`, { signal });
 }
 
+export function getIncidentInvestigation(id: string, signal?: AbortSignal): Promise<InvestigationReport> {
+  return request<InvestigationReport>(`/incidents/${encodeURIComponent(id)}/investigation`, { signal });
+}
+
 export function getStats(signal?: AbortSignal): Promise<StatsResponse> {
   return request<StatsResponse>("/stats", { signal });
+}
+
+export function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
+  return request<HealthResponse>("/health", { signal });
 }
 
 export function createIncident(data: CreateIncidentRequest, signal?: AbortSignal): Promise<IncidentDetail> {
