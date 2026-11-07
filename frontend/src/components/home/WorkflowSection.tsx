@@ -70,10 +70,11 @@ export default function WorkflowSection() {
         <ol className="ledger m-0 list-none p-0">
           {WORKFLOW_STEPS.map((step) => (
               <li key={step.number} className="grid grid-cols-[44px_minmax(0,1fr)] items-baseline gap-x-5 gap-y-1 border-b border-line py-6 sm:grid-cols-[64px_minmax(0,1fr)_auto]">
-                <span className={`display tabular row-span-2 text-[34px] leading-none sm:row-span-1 ${step.memory ? "text-gold" : "text-ink-4"}`}>
+                <span className={`display tabular col-start-1 row-span-2 row-start-1 text-[34px] leading-none sm:row-span-1 ${step.memory ? "text-gold" : "text-ink-4"}`}>
                   {step.number}
                 </span>
-                <div className="row-start-2 min-w-0 sm:row-start-1">
+                {/* Explicit column: without it the text block was auto-placed into the 44px number column on phones. */}
+                <div className="col-start-2 row-start-2 min-w-0 sm:row-start-1">
                   <h3 className="text-[17px] font-medium leading-snug">{step.title}</h3>
                   <p className="mt-1.5 max-w-[58ch] text-[14.5px] text-ink-2">{step.description}</p>
                 </div>

@@ -388,7 +388,8 @@ section[id] { scroll-margin-top: 80px; }
 
   /* ---------- Transparent navigation ---------- */
   .glass-bar {
-    background: color-mix(in srgb, var(--paper) 55%, transparent);
+    /* Opaque: at 55% (and even 92%) scrolled text showed through the sticky header, most visibly on phones. */
+    background: var(--paper);
     backdrop-filter: blur(16px) saturate(140%);
     -webkit-backdrop-filter: blur(16px) saturate(140%);
   }

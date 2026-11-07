@@ -9,7 +9,55 @@ gets better over time.
 |---|---|---|
 | Backend API (FastAPI, SQLite, SSE) | `app/`, `data/`, `scripts/` | Manmath |
 | Intelligence engine and real agent (Groq → Gemini → Ollama) | `aftermath_intelligence/`, `app/agent/real_agent.py` | Aditya |
-| Frontend (Next.js) | separate app, calls this API | Shashank |
+| Frontend (Next.js) | `frontend/` | Shashank |
+
+## Live demo
+
+| | URL |
+|---|---|
+| **Web app** | **https://aftermath-ebon.vercel.app** |
+| Backend API | https://aftermath-api-myyo.onrender.com ([interactive docs](https://aftermath-api-myyo.onrender.com/docs)) |
+
+The backend runs in real mode with [Hindsight](https://github.com/vectorize-io/hindsight) as the agent's memory, on
+free tiers (Vercel and Render). The first request after about 15 idle minutes takes up to a minute while the backend
+wakes up. Demo data is re-seeded on every start, so incidents you create there are temporary; what was learned stays
+in Hindsight.
+
+**Try it:** open the dashboard → an open payments incident (or **Create incident** with the payments demo alert from
+`data/demo_alerts.json`) → **Analyze**. Similar past incidents are recalled from Hindsight, with the fixes that failed
+before shown as warnings.
+
+## Screenshots
+
+**Where Hindsight sits in the stack**
+
+![Architecture: web app, backend API, investigation engine and Hindsight agent memory](docs/screenshots/architecture.jpg)
+
+**An analysis: likely root cause, and similar past incidents recalled from memory**
+
+![Incident analysis with the likely root cause and similar past incidents](docs/screenshots/incident-analysis.jpg)
+
+| Memory comes from Hindsight | Lessons carried over from past incidents |
+|---|---|
+| ![Failure chain card showing "Memory: Consulted · hindsight"](docs/screenshots/memory-source-hindsight.jpg) | ![Failed fixes become "avoid" warnings, proven fixes and the recurrence trend](docs/screenshots/lessons-from-memory.jpg) |
+
+| Recalled incidents in the investigation graph | Similar past incidents, with root cause and fix |
+|---|---|
+| ![Investigation graph linking the active incident to recalled memories](docs/screenshots/investigation-graph.jpg) | ![Similar past incidents with their root causes and the fixes that worked](docs/screenshots/similar-past-incidents.jpg) |
+
+**Retain and recall against the live Hindsight bank**
+
+![Facts Hindsight extracted from a resolution, and a recall for a payments outage](docs/screenshots/hindsight-retain-recall.jpg)
+
+**The Hindsight memory bank**
+
+| All memories | Filtered to `service:payments-api` |
+|---|---|
+| ![Hindsight constellation view of the Aftermath incidents bank](docs/screenshots/hindsight-bank.jpg) | ![Hindsight constellation filtered to payments-api memories](docs/screenshots/hindsight-bank-payments.jpg) |
+
+![Hindsight memories table: facts extracted from resolved payments incidents, tagged service:payments-api](docs/screenshots/hindsight-memories-table.jpg)
+
+![Hindsight usage: retain and recall tokens](docs/screenshots/hindsight-usage.jpg)
 
 ---
 
