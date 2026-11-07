@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 from sqlmodel import Session
@@ -148,3 +149,51 @@ def test_cors_allows_frontend_origin(client):
     assert other.headers["access-control-allow-origin"] == "https://aftermath.example.com"
     evil = client.get("/health", headers={"Origin": "https://evil.example"})
     assert "access-control-allow-origin" not in evil.headers
+
+
+# ---------------------------------------------------------------- secrets are redacted on write (#9)
+
+SECRETS = ("Hunter2Secret!", "AKIAIOSFODNN7EXAMPLE", "ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+
+
+def test_secrets_in_logs_and_alert_are_never_stored_or_returned(client, make_incident):
+    incident = make_incident(
+        alert_text="DB auth failing, password=Hunter2Secret! on primary",
+        logs=("ERROR connect failed password=Hunter2Secret! aws_key=AKIAIOSFODNN7EXAMPLE "
+              "token=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n"
+              "java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is not available"),
+    )
+    for body in (incident, client.get(f"/incidents/{incident['id']}").json(), client.get("/incidents").json()):
+        text = json.dumps(body)
+        assert not any(secret in text for secret in SECRETS), text
+    detail = client.get(f"/incidents/{incident['id']}").json()
+    assert "[REDACTED" in detail["logs"] and "[REDACTED" in detail["alert_text"]
+    # Ordinary log text is untouched, so analysis still has its evidence.
+    assert "HikariPool-1 - Connection is not available" in detail["logs"]
+
+
+def test_secrets_in_resolution_are_redacted_before_storage_and_memory(client, app, make_incident):
+    learned = []
+    original = app.state.agent.learn_from_resolution
+
+    async def spy(incident, resolution):
+        learned.append(resolution)
+        await original(incident, resolution)
+
+    app.state.agent.learn_from_resolution = spy
+    incident = make_incident()
+    response = client.post(f"/incidents/{incident['id']}/resolve", json={
+        "root_cause": "Rotated DB password=Hunter2Secret! was not deployed",
+        "fix_that_worked": "Updated secret aws_key=AKIAIOSFODNN7EXAMPLE in the vault",
+        "what_failed": ["Retried with token=ghp_abcdefghijklmnopqrstuvwxyz0123456789"],
+        "notes": "password=Hunter2Secret!",
+    })
+    assert response.status_code == 200
+    stored = json.dumps(client.get(f"/incidents/{incident['id']}").json())
+    assert not any(secret in stored for secret in SECRETS)
+    assert not any(secret in learned[0].model_dump_json() for secret in SECRETS)
+
+
+def test_ordinary_incident_text_is_unchanged_by_redaction(client, make_incident):
+    incident = make_incident()
+    assert (incident["title"], incident["alert_text"], incident["logs"]) == (ALERT["title"], ALERT["alert_text"], ALERT["logs"])
