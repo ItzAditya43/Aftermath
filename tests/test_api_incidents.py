@@ -197,3 +197,36 @@ def test_secrets_in_resolution_are_redacted_before_storage_and_memory(client, ap
 def test_ordinary_incident_text_is_unchanged_by_redaction(client, make_incident):
     incident = make_incident()
     assert (incident["title"], incident["alert_text"], incident["logs"]) == (ALERT["title"], ALERT["alert_text"], ALERT["logs"])
+
+
+# ---------------------------------------------------------------- concurrent creates (#31)
+
+def test_concurrent_creates_all_succeed_with_unique_ids(client):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def create(i):
+        return client.post("/incidents", json={**ALERT, "title": f"parallel incident {i}"})
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        responses = list(pool.map(create, range(20)))
+    assert [r.status_code for r in responses] == [201] * 20, [r.text for r in responses if r.status_code != 201][:2]
+    ids = [r.json()["id"] for r in responses]
+    assert len(set(ids)) == 20
+    assert len(client.get("/incidents").json()) == 20
+
+
+def test_create_retries_when_another_process_took_the_id(client, make_incident, monkeypatch):
+    from app import services
+
+    taken = make_incident()["id"]
+    real = services.next_incident_id
+    calls = []
+
+    def stale_then_real(session):
+        calls.append(1)
+        return taken if len(calls) == 1 else real(session)  # first pick collides, like a parallel worker
+
+    monkeypatch.setattr(services, "next_incident_id", stale_then_real)
+    response = client.post("/incidents", json=ALERT)
+    assert response.status_code == 201 and response.json()["id"] != taken
+    assert len(calls) == 2

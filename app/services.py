@@ -2,10 +2,12 @@
 
 import logging
 import math
+import threading
 from collections.abc import AsyncIterator
 from datetime import datetime
 
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, delete, select
 
 from aftermath_intelligence.redaction import redact_sensitive_text
@@ -19,7 +21,7 @@ from app.agent.interface import (
     SuggestionEvent,
     agent_event_adapter,
 )
-from app.errors import ConflictError, NotFoundError
+from app.errors import AppError, ConflictError, NotFoundError
 from app.models import (
     Incident,
     IncidentStatus,
@@ -36,6 +38,10 @@ ID_PREFIX = "INC-"
 # Seed incidents occupy INC-1001..INC-1020; live incidents are numbered after them so that
 # seeding after creating incidents never collides.
 FIRST_LIVE_ID_NUMBER = 1021
+# Ids are "highest + 1", so two creates at once could pick the same one. The lock serialises id choice and insert
+# within this process; the IntegrityError retry covers several workers/processes sharing one database.
+_CREATE_LOCK = threading.Lock()
+_MAX_ID_ATTEMPTS = 10
 
 
 # ---------------------------------------------------------------------------
@@ -130,15 +136,22 @@ def redact_resolution(data: ResolveRequest) -> ResolveRequest:
 
 def create_incident(session: Session, data: IncidentCreate) -> Incident:
     data = redact_incident(data)
-    incident = Incident(id=next_incident_id(session), **data.model_dump())
-    session.add(incident)
-    add_timeline(
-        session, incident.id, TimelineType.alert, f"[{incident.severity.value}] Alert fired: {incident.alert_text}",
-        timestamp=incident.created_at,
-    )
-    session.commit()
-    session.refresh(incident)
-    return incident
+    for _ in range(_MAX_ID_ATTEMPTS):
+        with _CREATE_LOCK:
+            incident = Incident(id=next_incident_id(session), **data.model_dump())
+            session.add(incident)
+            add_timeline(
+                session, incident.id, TimelineType.alert,
+                f"[{incident.severity.value}] Alert fired: {incident.alert_text}", timestamp=incident.created_at,
+            )
+            try:
+                session.commit()
+            except IntegrityError:  # another process took this id first; pick the next one
+                session.rollback()
+                continue
+        session.refresh(incident)
+        return incident
+    raise AppError(503, "unavailable", "Too many incidents are being created at once; please retry.")
 
 
 def list_incidents(
