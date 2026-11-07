@@ -7,9 +7,8 @@ from app.agent.interface import AgentService
 from app.config import Settings
 from app.errors import AppError
 
-# Hosts that count as "this machine" when no admin key is configured. "testclient" is the host Starlette's
-# TestClient reports; it can't come from a real socket.
-_LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+# Hosts that count as "this machine" when no admin key is configured. Taken from the socket, never from headers.
+_LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
 def get_agent(request: Request) -> AgentService:

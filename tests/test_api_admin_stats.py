@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from tests.conftest import LOCAL_CLIENT
 
 
 def test_seed_loads_20_incidents(client, seeded):
@@ -129,12 +130,12 @@ def test_auto_seed_on_startup_and_mock_memory_survives_restart(settings):
     from app.main import create_app
 
     auto = settings.model_copy(update={"auto_seed": True})
-    with TestClient(create_app(auto)) as c:
+    with TestClient(create_app(auto), client=LOCAL_CLIENT) as c:
         assert len(c.get("/incidents").json()) == 20
 
     # A fresh process (new app, same DB): the mock agent's memory is rebuilt from resolved incidents.
     restarted = create_app(auto)
-    with TestClient(restarted) as c:
+    with TestClient(restarted, client=LOCAL_CLIENT) as c:
         assert len(c.get("/incidents").json()) == 20  # not seeded twice
         assert len(restarted.state.agent.memory) == 20
 
@@ -145,7 +146,7 @@ def test_auto_seed_on_startup_and_mock_memory_survives_restart(settings):
 @pytest.fixture
 def keyed_client(settings):
     app = create_app(settings.model_copy(update={"admin_api_key": "s3cret-admin-key"}))
-    with TestClient(app) as c:
+    with TestClient(app, client=LOCAL_CLIENT) as c:
         yield c
 
 
@@ -181,3 +182,9 @@ def test_without_a_key_admin_routes_refuse_non_local_callers(settings, path):
 def test_without_a_key_admin_routes_work_from_localhost(settings):
     with TestClient(create_app(settings), client=("127.0.0.1", 50000)) as local:
         assert local.post("/admin/seed").status_code == 200
+
+
+def test_testclient_host_is_not_treated_as_localhost(settings):
+    """#38: the test framework's placeholder host must not pass the localhost check."""
+    with TestClient(create_app(settings)) as default:  # reports its host as "testclient"
+        assert default.post("/admin/reset").status_code == 403
