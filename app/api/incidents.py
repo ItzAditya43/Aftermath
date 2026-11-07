@@ -6,7 +6,7 @@ from sqlmodel import col, select
 from sse_starlette.sse import EventSourceResponse
 
 from app import services
-from app.api.deps import AgentDep
+from app.api.deps import AgentDep, AnalyzeGuard, WriteGuard
 from app.db import SessionDep
 from app.errors import NotFoundError, error_responses
 from app.models import Incident, IncidentStatus, MemoryReference
@@ -37,7 +37,10 @@ SSE_EXAMPLE = (
 )
 
 
-@router.post("", response_model=IncidentDetail, status_code=201, responses=error_responses(422))
+@router.post(
+    "", response_model=IncidentDetail, status_code=201, dependencies=WriteGuard,
+    responses=error_responses(401, 413, 422, 429),
+)
 def create_incident(data: IncidentCreate, session: SessionDep) -> IncidentDetail:
     """Open a new incident from a production alert. Also records an `alert` timeline event."""
     incident = services.create_incident(session, data)
@@ -66,6 +69,7 @@ def get_incident(incident_id: str, session: SessionDep) -> IncidentDetail:
 @router.get(
     "/{incident_id}/analyze",
     response_class=EventSourceResponse,
+    dependencies=AnalyzeGuard,
     responses={
         200: {
             "description": (
@@ -75,7 +79,7 @@ def get_incident(incident_id: str, session: SessionDep) -> IncidentDetail:
             ),
             "content": {"text/event-stream": {"example": SSE_EXAMPLE}},
         },
-        **error_responses(404),
+        **error_responses(401, 404, 429),
     },
 )
 async def analyze_incident(incident_id: str, request: Request, session: SessionDep, agent: AgentDep):
@@ -89,7 +93,8 @@ async def analyze_incident(incident_id: str, request: Request, session: SessionD
 
 
 @router.post(
-    "/{incident_id}/resolve", response_model=ResolveResponse, responses=error_responses(404, 409, 422)
+    "/{incident_id}/resolve", response_model=ResolveResponse, dependencies=WriteGuard,
+    responses=error_responses(401, 404, 409, 413, 422, 429),
 )
 async def resolve_incident(
     incident_id: str, data: ResolveRequest, session: SessionDep, agent: AgentDep

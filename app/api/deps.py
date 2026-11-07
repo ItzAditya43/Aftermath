@@ -41,3 +41,34 @@ def require_admin(
     host = request.client.host if request.client else None
     if host not in _LOCAL_HOSTS:
         raise AppError(403, "forbidden", "Admin routes are only available from localhost unless ADMIN_API_KEY is set")
+
+
+def require_api_key(
+    settings: SettingsDep,
+    x_api_key: Annotated[str | None, Header(description="Required when API_KEY is set")] = None,
+) -> None:
+    """When API_KEY is set, create / analyze / resolve need a matching X-API-Key header (401 otherwise)."""
+    if settings.api_key and (
+        x_api_key is None or not hmac.compare_digest(x_api_key.encode(), settings.api_key.encode())
+    ):
+        raise AppError(401, "unauthorized", "Missing or invalid X-API-Key header")
+
+
+def _rate_limit(bucket: str):
+    def check(request: Request) -> None:
+        limiter = request.app.state.rate_limiters[bucket]
+        client = request.client.host if request.client else "unknown"
+        wait = limiter.check(client)
+        if wait is not None:
+            raise AppError(
+                429, "rate_limited",
+                f"Too many requests; at most {limiter.limit} per minute. Retry in {limiter.retry_after_header(wait)} s.",
+                headers={"Retry-After": limiter.retry_after_header(wait)},
+            )
+
+    return check
+
+
+# Order matters: the key is checked first, so unauthenticated calls never use up a client's quota.
+AnalyzeGuard = [Depends(require_api_key), Depends(_rate_limit("analyze"))]
+WriteGuard = [Depends(require_api_key), Depends(_rate_limit("write"))]

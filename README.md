@@ -84,7 +84,7 @@ Field values:
 - Incident IDs look like `INC-1021`. Seed incidents are `INC-1001` to `INC-1020`.
 - Timestamps are ISO-8601 UTC (`...Z`).
 
-**Errors** always have this shape, with status `401`, `403`, `404`, `409`, `413`, `422` or `500`:
+**Errors** always have this shape, with status `401`, `403`, `404`, `409`, `413`, `422`, `429` or `500`:
 
 ```json
 {"error": {"code": "not_found", "message": "Incident INC-9999 not found"}}
@@ -192,6 +192,9 @@ calibrated suggestion and "uncalibrated ranking score 0.86" otherwise.
 | `MOCK_TOKEN_DELAY_MS` | `30` | typing speed of the mock agent's stream |
 | `ADMIN_API_KEY` | empty | required as `X-Admin-Key` on `/admin/*`; when empty, admin routes accept localhost only |
 | `MAX_REQUEST_BYTES` | `2097152` (2 MiB) | larger request bodies get `413` before they are parsed |
+| `ANALYZE_RATE_LIMIT_PER_MINUTE` | `10` | analyses per client per minute (`429` + `Retry-After` above it; `0` = off) |
+| `WRITE_RATE_LIMIT_PER_MINUTE` | `30` | creates + resolves per client per minute (`0` = off) |
+| `API_KEY` | empty | when set, create / analyze / resolve need `X-API-Key`. For private or API-only deployments: a key built into a public browser app isn't secret, so a public demo relies on the rate limits |
 
 `.env` is gitignored. Never commit real keys.
 

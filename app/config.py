@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     # valid incident (200k characters of logs, even fully JSON-escaped).
     max_request_bytes: int = 2 * 1024 * 1024
 
+    # Per-client requests per minute (0 = off). Each analysis can make several AI calls, so it gets the tighter limit.
+    analyze_rate_limit_per_minute: int = 10
+    write_rate_limit_per_minute: int = 30  # POST /incidents and POST /incidents/{id}/resolve
+
+    # Optional shared key for create / analyze / resolve, sent as X-API-Key. Off by default: a key built into a
+    # public browser app is not secret, so for a public demo the rate limits are the protection. Use it for
+    # private or API-only deployments (alert webhooks, scripts).
+    api_key: str = ""
+
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip().rstrip("/") for origin in self.frontend_origin.split(",") if origin.strip()]
